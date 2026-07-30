@@ -75,6 +75,32 @@ def mask_value(f: Finding) -> str:
 # ---------------------------------------------------------------------------
 # 리댁션 적용
 # ---------------------------------------------------------------------------
+# 주의(실측으로 확인한 함정): add_redact_annot(text=..., fontsize=N)에 폰트 크기를
+# 지정해도 PyMuPDF는 원본 글자의 좁은 사각형 안에 억지로 맞추면서 자동으로 글자를
+# 줄여버림 (예: 11pt를 줘도 실제로는 8~9pt로 축소되어 삽입됨). 그래서 리댁션은
+# "지우기"만 담당하게 하고, 마스킹된 텍스트는 원본과 같은 폰트 크기·위치(baseline)를
+# 직접 계산해서 별도로 그려 넣는 방식으로 바꿈.
+def _plan_replacements(page: fitz.Page, value_to_masked: dict[str, str]):
+    """리댁션 전에, 각 span에서 대상 문자열의 정확한 baseline 위치와 폰트 크기를 계산."""
+    plans = []  # (rect, masked_text, baseline_point, fontsize)
+    for block in page.get_text("dict").get("blocks", []):
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                text = span["text"]
+                size = span.get("size", 11)
+                ox, oy = span["origin"]
+                for value, masked in value_to_masked.items():
+                    start = 0
+                    while (idx := text.find(value, start)) != -1:
+                        prefix_width = fitz.get_text_length(text[:idx], fontname="korea", fontsize=size)
+                        value_width = fitz.get_text_length(value, fontname="korea", fontsize=size)
+                        baseline = (ox + prefix_width, oy)
+                        rect = fitz.Rect(ox + prefix_width, span["bbox"][1], ox + prefix_width + value_width, span["bbox"][3])
+                        plans.append((rect, masked, baseline, size))
+                        start = idx + len(value)
+    return plans
+
+
 def apply_masking(doc: fitz.Document, findings: list[Finding]) -> dict[str, str]:
     approved = [f for f in findings if f.approved]
     value_to_masked: dict[str, str] = {}
@@ -82,10 +108,22 @@ def apply_masking(doc: fitz.Document, findings: list[Finding]) -> dict[str, str]
         value_to_masked.setdefault(f.value, mask_value(f))
 
     for page in doc:
+        plans = _plan_replacements(page, value_to_masked)
+        # 계획한 위치가 있으면 그대로, 없으면(다중 span에 걸친 값 등) search_for로 대체 탐색
+        planned_rects = {tuple(round(c, 1) for c in p[0]) for p in plans}
         for value, masked in value_to_masked.items():
             for rect in page.search_for(value):
-                page.add_redact_annot(rect, text=masked, fontname="korea", fontsize=10)
+                key = tuple(round(c, 1) for c in rect)
+                if key not in planned_rects:
+                    plans.append((rect, masked, None, 11))
+
+        for rect, masked, baseline, size in plans:
+            page.add_redact_annot(rect, fill=(1, 1, 1))
         page.apply_redactions()
+
+        for rect, masked, baseline, size in plans:
+            point = baseline if baseline is not None else (rect.x0, rect.y1 - 2)
+            page.insert_text(point, masked, fontname="korea", fontsize=size)
 
     return value_to_masked
 

@@ -88,11 +88,20 @@ class ReviewWindow(QDialog):
         self.accept()
 
 
-def run_review(filename: str, findings: list[Finding]) -> list[Finding] | None:
+def run_review(
+    filename: str, findings: list[Finding], _auto_approve_after_ms: int | None = None
+) -> list[Finding] | None:
     """검토 화면을 띄우고, 승인되면 approved 플래그가 반영된 findings를,
-    취소/닫힘이면 None을 반환."""
+    취소/닫힘이면 None을 반환.
+
+    _auto_approve_after_ms: 실사용에서는 쓰지 않음. 화면이 없는 환경(headless)에서
+    통합 테스트할 때만 사용 — 지정한 시간 뒤 자동으로 승인 버튼을 누른 것처럼 동작.
+    """
     app = QApplication.instance() or QApplication([])
     window = ReviewWindow(filename, findings)
+    if _auto_approve_after_ms is not None:
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(_auto_approve_after_ms, window._on_approve)
     window.exec()
     if window.approved_result:
         return findings

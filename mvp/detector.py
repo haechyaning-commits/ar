@@ -157,6 +157,19 @@ def detect_all(text: str) -> list[Finding]:
     findings += detect_account(text)
     findings += detect_names(text)
     findings += detect_addresses(text)
+
+    # 같은 위치(start/end)가 서로 다른 규칙에 동시에 걸리는 경우가 있음
+    # (예: "계좌" 라벨 근처의 전화번호가 전화번호+계좌번호로 이중 탐지됨) -> 하나만 남김
+    seen_spans: set[tuple[int, int]] = set()
+    deduped: list[Finding] = []
+    for f in findings:
+        key = (f.start, f.end)
+        if key in seen_spans:
+            continue
+        seen_spans.add(key)
+        deduped.append(f)
+    findings = deduped
+
     findings.sort(key=lambda f: f.start)
     return findings
 

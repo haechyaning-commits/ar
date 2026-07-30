@@ -88,7 +88,11 @@ def detect_passport(text: str) -> list[Finding]:
 def detect_account(text: str) -> list[Finding]:
     out = []
     for m in ACCOUNT_RE.finditer(text):
-        window = text[max(0, m.start() - 15):m.start()]
+        # 문맥 검색은 같은 줄 안에서만 (버그: 이전엔 줄바꿈을 넘어 이전 줄의
+        # 무관한 단어까지 "계좌" 문맥으로 잘못 인정했음)
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        window_start = max(line_start, m.start() - 15)
+        window = text[window_start:m.start()]
         if "계좌" in window or "입금" in window or "예금주" in window:
             out.append(Finding("계좌번호", m.group(), m.start(), m.end()))
     return out

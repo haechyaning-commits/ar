@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 *.tmp
+mvp/_dummy_audit_file.pdf
+mvp/_dummy_audit_file_masked.pdf

@@ -39,7 +39,10 @@ def mask_phone(value: str) -> str:
 
 def mask_email(value: str) -> str:
     local, _, domain = value.partition("@")
-    keep = min(2, max(1, len(local) - 1))
+    # 로컬파트가 1글자면 남길 게 없으므로 전부 마스킹 (버그: 이전엔 이 경우 마스킹이 0글자 -> 원본 그대로 노출됨)
+    if len(local) <= 1:
+        return "*" * len(local) + "@" + domain
+    keep = min(2, len(local) - 1)
     return local[:keep] + "*" * (len(local) - keep) + "@" + domain
 
 
@@ -156,7 +159,10 @@ def has_hidden_content(doc: fitz.Document) -> bool:
             return True
         if page.first_widget is not None:
             return True
-    return doc.embfile_count() > 0
+    if doc.embfile_count() > 0:
+        return True
+    # 설계서 6.5.1-2가 약속한 OCG(선택적 콘텐츠 레이어) 검사가 빠져있던 부분 -> 추가
+    return bool(doc.get_ocgs())
 
 
 def scrub_metadata(doc: fitz.Document) -> None:

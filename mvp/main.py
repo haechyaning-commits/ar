@@ -30,7 +30,7 @@ def process_file(input_path: str, output_path: str | None = None,
                   _auto_reprocess_confirm: bool | None = None) -> int:
     """반환값:
     0=성공, 1=탐지 없음, 2=검토 취소, 3=자체검증 실패,
-    4=재실행 확인에서 취소, 5=출력 처리(마커/이동/로그/리포트) 실패
+    4=재실행 확인에서 취소, 5=출력 처리(마커/이동/로그/리포트) 실패, 6=출력 폴더 준비 실패
 
     _auto_processor_name / _auto_reprocess_confirm: 실사용에서는 쓰지 않음.
     화면이 없는 환경(headless)에서 통합 테스트할 때, 사용자 입력을 기다리는
@@ -39,7 +39,11 @@ def process_file(input_path: str, output_path: str | None = None,
     src = Path(input_path).resolve()
     app = QApplication.instance() or QApplication([])
 
-    folders = output.ensure_folders(output.app_base_dir())
+    try:
+        folders = output.ensure_folders(output.app_base_dir())
+    except OSError as exc:
+        print(f"[{src.name}] 출력 폴더 준비 실패 — 처리하지 않음. ({type(exc).__name__})")
+        return 6
 
     if output.is_already_processed(src):
         if _auto_reprocess_confirm is not None:
@@ -80,7 +84,7 @@ def process_file(input_path: str, output_path: str | None = None,
     result = mask_pdf(str(src), reviewed.findings, str(final_output_path))
 
     if not result.success:
-        print(f"[{src.name}] 자체 재검증 실패 — 저장하지 않음. 남은 항목: {result.leftover}")
+        print(f"[{src.name}] 자체 재검증 실패 — 저장하지 않음. 남은 항목 수: {len(result.leftover)}")
         return 3
 
     print(f"[{src.name}] 마스킹 완료 -> {result.output_path}")

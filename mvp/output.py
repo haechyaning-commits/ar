@@ -11,11 +11,27 @@ import getpass
 import hashlib
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 import fitz  # PyMuPDF
+
+
+def app_base_dir() -> Path:
+    """출력 폴더(원본_보관/마스킹완료/요약리포트/로그)의 기준 위치 (6.6).
+
+    입력 파일이 어느 폴더에 있든, 결과는 항상 프로그램(.exe) 옆 한 곳에 모여야
+    감사 이력을 한 로그로 관리할 수 있음 — 그래서 입력 파일 경로가 아니라
+    "프로그램 자신의 위치"를 기준으로 함.
+    PyInstaller로 패키징된 .exe에서는 sys.executable이 실제 실행 파일 경로를
+    가리키므로 그걸 사용하고(임시 압축해제 경로인 sys._MEIPASS가 아님에 주의),
+    일반 파이썬 스크립트로 실행할 때는 이 파일이 있는 폴더를 사용함.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
 
 # 처리완료 표시 마커 (6.4) — 개인정보가 아닌 고정 문자열, PDF 표준 메타데이터(keywords)에 남김
 PROCESSED_MARKER = "MaskingTool-Processed:true"

@@ -39,7 +39,7 @@ def process_file(input_path: str, output_path: str | None = None,
     src = Path(input_path).resolve()
     app = QApplication.instance() or QApplication([])
 
-    folders = output.ensure_folders(src.parent)
+    folders = output.ensure_folders(output.app_base_dir())
 
     if output.is_already_processed(src):
         if _auto_reprocess_confirm is not None:

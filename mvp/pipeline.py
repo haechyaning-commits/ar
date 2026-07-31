@@ -68,8 +68,16 @@ def process_atomic(
     masked_dir = workspace / MASKED_DIR_NAME
     original_dir = workspace / ORIGINAL_DIR_NAME
     log_path = workspace / LOG_DIR_NAME / LOG_FILE_NAME
-    masked_dir.mkdir(parents=True, exist_ok=True)
-    original_dir.mkdir(parents=True, exist_ok=True)
+
+    # ⚠ 이전 버전은 이 mkdir이 트랜잭션 try 블록 밖에 있어서, 워크스페이스 사전조건이
+    # 깨진 경우(예: 원본_보관 자리에 일반 파일이 이미 있음) 예외가 그대로 호출자(main.py)
+    # 까지 전파돼 사용자에게 파이썬 트레이스백이 노출됐다 (실측으로 확인). 원본은 아직
+    # 손대지 않은 시점이라 안전하지만, 깔끔한 실패 결과로 감싸도록 수정.
+    try:
+        masked_dir.mkdir(parents=True, exist_ok=True)
+        original_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return PipelineResult(False, error=f"workspace_setup_failed: {type(exc).__name__}")
 
     # 1. 마스킹 + 자체 재검증은 워크스페이스 밖 임시 경로에서 먼저 수행 (아직 아무것도 확정 아님)
     tmp_dir = tempfile.mkdtemp(prefix="masking_tmp_")

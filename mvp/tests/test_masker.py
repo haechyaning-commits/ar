@@ -1,8 +1,8 @@
 """
 masker.py 스트레스 테스트 -- 리댁션/자체재검증/숨김콘텐츠/메타데이터/회전텍스트.
 
-기본 케이스는 "정상 동작 확인"이고, 일부 케이스는 이번 테스트로 실측 확인된
-알려진 문제를 회귀 테스트로 고정한 것이다 (해당 테스트는 주석에 ⚠로 표시).
+회전 텍스트 중복삽입, 숨김 콘텐츠(주석/첨부/폼필드) 미스크러빙 버그를 이 테스트로
+실측 발견해 masker.py에서 수정했고, 아래 테스트는 수정된(올바른) 동작을 검증한다.
 
 실제 감사파일이 아닌 더미 데이터로만 테스트할 것 (설계서 2.1 선행 조건).
 """
@@ -94,8 +94,8 @@ def test_metadata_scrubbed():
     check("XMP 메타데이터 비워짐", xml == "", repr(xml))
 
 
-def test_rotated_text_pii_removed_but_replacement_rendering_is_broken():
-    print("test_rotated_text_pii_removed_but_replacement_rendering_is_broken")
+def test_rotated_text_masked_correctly_no_duplicate():
+    print("test_rotated_text_masked_correctly_no_duplicate")
     tmp = _new_tmp()
     src = tmp / "rotated.pdf"
     doc = fitz.open()
@@ -108,29 +108,31 @@ def test_rotated_text_pii_removed_but_replacement_rendering_is_broken():
 
     out = tmp / "rotated_masked.pdf"
     findings, result = _mask(src, out)
-    check("회전 텍스트 경고 플래그가 True (설계서 6.5.1-4 완화책)", result.rotated_text_warning)
+    check("회전 텍스트 경고 플래그가 True (설계서 6.5.1-4 완화책, 육안 재확인 권고는 유지)",
+          result.rotated_text_warning)
     check("이번 케이스는 sort=True 덕분에 탐지 자체는 됨 (RRN 1건)",
           len(findings) == 1 and findings[0].type == "주민등록번호", str(findings))
-    check("자체 재검증은 통과(원문 숫자는 안 남음)", result.success, str(result.leftover))
+    check("자체 재검증 통과(원문 숫자는 안 남음)", result.success, str(result.leftover))
 
     masked_doc = fitz.open(out)
-    spans = [s for b in masked_doc[0].get_text("dict")["blocks"] for l in b.get("lines", []) for s in l["spans"]]
+    lines_info = [(s["text"], line.get("dir"))
+                  for b in masked_doc[0].get_text("dict")["blocks"]
+                  for line in b.get("lines", []) for s in line["spans"]]
     masked_doc.close()
-    mask_spans = [s for s in spans if "*" in s["text"]]
-    # ⚠ 확인된 문제: 마스킹 대체 텍스트("******-*******")가 두 곳에 중복 삽입되고,
-    # 둘 다 원본의 회전 방향(dir=(0,-1))을 무시한 채 가로로 삽입됨 -- PII 자체는
-    # 지워지지만 결과물이 시각적으로 깨짐. apply_masking()이 line.get("dir")를
-    # 반영하지 않고 항상 수평으로 insert_text 하기 때문 (masker.py _plan_replacements/apply_masking).
-    check("⚠ 알려진 문제: 마스킹 텍스트가 중복 삽입됨 (기대: 1곳, 실제)",
-          len(mask_spans) == 2, f"{len(mask_spans)}개 span: {[s['text'] for s in mask_spans]}")
-    if mask_spans:
-        check("⚠ 알려진 문제: 대체 텍스트가 원본 회전 방향을 무시하고 가로로 삽입됨",
-              all(abs(s.get("dir", (1, 0))[1]) < 0.01 for s in mask_spans),
-              "원래 라벨은 세로(dir=(0,-1))인데 마스킹 텍스트는 가로로 들어감")
+    mask_lines = [(t, d) for t, d in lines_info if "*" in t]
+    # 회전 방향(dir)을 반영하도록 고친 뒤: 대체 텍스트가 정확히 한 곳에만, 원본과 같은
+    # 세로 방향(dir=(0,-1))으로 삽입되고 중복이 없어야 한다 (이전엔 2곳에 가로로 중복 삽입됐음).
+    check("마스킹 텍스트가 정확히 한 곳에만 삽입됨(중복 없음)",
+          len(mask_lines) == 1, f"{len(mask_lines)}개: {mask_lines}")
+    if mask_lines:
+        text, direction = mask_lines[0]
+        check("마스킹된 값이 완전마스킹 형태로 들어감", text == "주민등록번호: ******-*******", text)
+        check("대체 텍스트가 원본과 같은 회전 방향(세로, dir=(0,-1))으로 삽입됨",
+              direction is not None and abs(direction[0]) < 0.01 and direction[1] < 0, str(direction))
 
 
-def test_hidden_annotation_content_survives_unscrubbed():
-    print("test_hidden_annotation_content_survives_unscrubbed")
+def test_hidden_annotation_content_gets_scrubbed():
+    print("test_hidden_annotation_content_gets_scrubbed")
     tmp = _new_tmp()
     src = tmp / "annot.pdf"
     doc = fitz.open()
@@ -146,25 +148,25 @@ def test_hidden_annotation_content_survives_unscrubbed():
 
     out = tmp / "annot_masked.pdf"
     findings, result = _mask(src, out)
-    check("본문 탐지 결과에는 주석 속 전화번호가 없음(주석은 본문 텍스트 추출 범위 밖)",
+    check("본문 탐지 결과에는 주석 속 전화번호가 없음(주석은 본문과 별도로 독립 스캔됨)",
           all(f.value != "010-9999-8888" for f in findings), str(findings))
-    check("자체 재검증은 '성공'으로 보고함(주석을 스캔하지 않으므로)", result.success)
-    check("hidden_content_warning 플래그는 True (경고는 뜸)", result.hidden_content_warning)
+    check("자체 재검증 통과(스크러빙 후 hidden_content_leftover까지 재확인)", result.success, str(result.leftover))
+    check("hidden_content_warning 플래그는 True (숨김 콘텐츠가 있었다는 사실은 계속 알림)",
+          result.hidden_content_warning)
 
     masked_doc = fitz.open(out)
     annots = list(masked_doc[0].annots() or [])
     contents = [a.info.get("content", "") for a in annots]
     masked_doc.close()
-    # ⚠ 확인된 문제(심각): 설계서 6.5.1-2는 "주석에서 PII 발견 시 제거"를 요구하지만
-    # 현재 masker.py의 has_hidden_content()는 존재 여부만 boolean으로 반환할 뿐 실제로
-    # 주석 내용을 스캔/제거하지 않는다. 그 결과 검토자가 승인한 적 없는 전화번호가
-    # "재검증 통과"로 표시된 최종 파일에 그대로 남는다.
-    check("⚠ 심각: 주석의 전화번호가 '마스킹 완료' 파일에 그대로 남아있음 (제거 안 됨)",
-          len(annots) == 1 and "010-9999-8888" in contents[0], str(contents))
+    # 수정 후: 검토자가 승인한 적 없는 값이라도 주석 안의 PII는 독립적으로 탐지해
+    # 그 자리에서 마스킹한다 (본문과 동일한 마스킹 형식: 전화번호 -> 부분마스킹).
+    check("주석의 원본 전화번호는 사라짐", all("010-9999-8888" not in c for c in contents), str(contents))
+    check("주석 내용이 마스킹된 형태로 대체됨(라벨 텍스트는 보존)",
+          contents == ["메모: 실제 연락처는 010-****-8888 입니다"], str(contents))
 
 
-def test_hidden_embedded_file_survives_unscrubbed():
-    print("test_hidden_embedded_file_survives_unscrubbed")
+def test_hidden_embedded_file_gets_scrubbed():
+    print("test_hidden_embedded_file_gets_scrubbed")
     tmp = _new_tmp()
     src = tmp / "embed.pdf"
     doc = fitz.open()
@@ -180,19 +182,18 @@ def test_hidden_embedded_file_survives_unscrubbed():
 
     out = tmp / "embed_masked.pdf"
     findings, result = _mask(src, out)
-    check("자체 재검증은 '성공'으로 보고함(첨부파일을 스캔하지 않으므로)", result.success)
+    check("자체 재검증 통과(스크러빙 후 hidden_content_leftover까지 재확인)", result.success, str(result.leftover))
 
     masked_doc = fitz.open(out)
     has_embed = masked_doc.embfile_count() > 0
     content = masked_doc.embfile_get(0).decode("utf-8") if has_embed else ""
     masked_doc.close()
-    # ⚠ 확인된 문제(심각): 첨부파일도 주석과 마찬가지로 내용 스캔/제거가 안 됨
-    check("⚠ 심각: 첨부파일 속 주민등록번호가 '마스킹 완료' 파일에 그대로 남아있음",
-          has_embed and "900101-1234568" in content, content)
+    check("첨부파일이 삭제되지 않고 그대로 유지되되 내용만 마스킹됨",
+          has_embed and content == "주민번호: ******-*******", content)
 
 
-def test_hidden_widget_triggers_genuine_self_check_failure():
-    print("test_hidden_widget_triggers_genuine_self_check_failure")
+def test_hidden_widget_gets_scrubbed_and_passes():
+    print("test_hidden_widget_gets_scrubbed_and_passes")
     tmp = _new_tmp()
     src = tmp / "widget.pdf"
     doc = fitz.open()
@@ -211,25 +212,63 @@ def test_hidden_widget_triggers_genuine_self_check_failure():
     findings, result = _mask(src, out)
     check("폼필드 값은 본문 텍스트 추출에 포함되어 탐지는 됨(주석/첨부와 다름)",
           any(f.value == "010-5555-6666" for f in findings), str(findings))
-    # ⚠ 참고할 만한 사실이지 버그는 아님: PyMuPDF의 add_redact_annot/apply_redactions가
-    # 폼필드 위젯의 외형(appearance stream)까지는 지우지 못해 실제로 재검증에 걸린다.
-    # 이건 "안전망이 의도대로 작동한 것"(설계서 6.5.1: 확실하지 않으면 저장 안 함) --
-    # 다만 현재 masker.py엔 이걸 우회할 대체 경로(6.5.1이 언급한 '페이지 이미지화' 등)가
-    # 아직 구현돼 있지 않아, 폼필드에 PII가 있는 실제 문서는 이 도구로 영구히 처리 불가하다.
-    check("자체 재검증이 실패로 보고됨 (안전망 정상 작동, 저장 안 함)", not result.success)
-    check("output_path는 None (아무 파일도 안 만들어짐)", result.output_path is None)
-    check("leftover에 폼필드 값이 정확히 찍힘", result.leftover == ["010-5555-6666"], str(result.leftover))
-    check("hidden_content_warning도 True (이중으로 경고)", result.hidden_content_warning)
+    # 이전엔 add_redact_annot/apply_redactions가 위젯 외형(appearance stream)을 못 지워
+    # 재검증에 걸려 저장 자체가 영구히 막혔다. widget.field_value를 직접 마스킹된 값으로
+    # 바꾸고 widget.update()로 외형을 재생성하는 방식으로 실제로 지워지도록 수정.
+    check("자체 재검증 통과(더 이상 영구 차단되지 않음)", result.success, str(result.leftover))
+    check("output_path가 정상 생성됨", result.output_path is not None)
+    check("hidden_content_warning은 True (폼필드가 있었다는 사실은 계속 알림)", result.hidden_content_warning)
+
+    masked_doc = fitz.open(out)
+    field_value = masked_doc[0].first_widget.field_value
+    masked_doc.close()
+    check("폼필드 값이 마스킹된 형태로 저장됨", field_value == "010-****-6666", field_value)
+
+
+def test_freetext_annotation_orphan_bytes_purged():
+    print("test_freetext_annotation_orphan_bytes_purged")
+    tmp = _new_tmp()
+    src = tmp / "freetext.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "지출결의서 신청인: 김테스트", fontsize=11, fontname="korea")
+    # FreeText 주석은 Text(스티키노트)와 달리 본문 텍스트 추출에도 내용이 잡히고,
+    # 리댁션이 겹치면 PDF 스펙상 주석 자체가 삭제된다 (실측 확인).
+    page.add_freetext_annot(fitz.Rect(72, 150, 300, 200),
+                             "연락처 010-1111-2222, 이메일 abc@test.com")
+    doc.save(src)
+    doc.close()
+
+    out = tmp / "freetext_masked.pdf"
+    findings, result = _mask(src, out)
+    check("자체 재검증 통과", result.success, str(result.leftover))
+
+    masked_doc = fitz.open(out)
+    check("리댁션이 겹치면서 FreeText 주석 자체가 삭제됨(부작용, PII 유출은 아님)",
+          len(list(masked_doc[0].annots() or [])) == 0)
+    masked_doc.close()
+
+    # ⚠ 실측으로 발견한 핵심 문제: 주석이 '삭제'돼도 doc.save()가 가비지 컬렉션 없이
+    # 저장하면, 참조가 끊긴 주석의 원본(마스킹 전) 어피어런스 스트림 객체가 파일
+    # 바이트에는 그대로 남아있었다 -- get_text() 기반 self_check는 이걸 못 잡음
+    # (더 이상 어디서도 '참조'되지 않는 죽은 객체라서). doc.save(..., garbage=4)로
+    # 고치고, raw_byte_leftover()로 저장된 파일을 직접 재검증하도록 안전망도 추가함.
+    raw = out.read_bytes()
+    check("⚠ 원본 전화번호가 저장된 파일 바이트 어디에도 없음(고아 객체 포함)",
+          b"010-1111-2222" not in raw)
+    check("⚠ 원본 이메일이 저장된 파일 바이트 어디에도 없음(고아 객체 포함)",
+          b"abc@test.com" not in raw)
 
 
 def main():
     tests = [
         test_basic_roundtrip_byte_level_removal,
         test_metadata_scrubbed,
-        test_rotated_text_pii_removed_but_replacement_rendering_is_broken,
-        test_hidden_annotation_content_survives_unscrubbed,
-        test_hidden_embedded_file_survives_unscrubbed,
-        test_hidden_widget_triggers_genuine_self_check_failure,
+        test_rotated_text_masked_correctly_no_duplicate,
+        test_hidden_annotation_content_gets_scrubbed,
+        test_hidden_embedded_file_gets_scrubbed,
+        test_hidden_widget_gets_scrubbed_and_passes,
+        test_freetext_annotation_orphan_bytes_purged,
     ]
     for t in tests:
         t()
@@ -240,7 +279,7 @@ def main():
         for f in _FAILURES:
             print(f"  - {f}")
         sys.exit(1)
-    print(f"모든 masker 테스트 통과 ({len(tests)}개 시나리오) -- ⚠ 표시된 항목은 '현재 동작을 고정'한 것이지 바람직한 동작이 아님")
+    print(f"모든 masker 테스트 통과 ({len(tests)}개 시나리오)")
     sys.exit(0)
 
 

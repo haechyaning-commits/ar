@@ -112,8 +112,8 @@ def test_log_accumulates_across_multiple_runs():
           all(len(r["original_sha256"]) == 64 for r in rows))
 
 
-def test_workspace_precondition_broken_raises_uncaught():
-    print("test_workspace_precondition_broken_raises_uncaught")
+def test_workspace_precondition_broken_fails_cleanly():
+    print("test_workspace_precondition_broken_fails_cleanly")
     ws = _new_tmp()
     src_dir = _new_tmp()
     # "원본_보관" 자리에 디렉토리가 아닌 일반 파일을 미리 만들어 mkdir을 깨뜨림
@@ -121,17 +121,12 @@ def test_workspace_precondition_broken_raises_uncaught():
 
     src = src_dir / "file.pdf"
     _make_dummy_pdf(src)
-    try:
-        process_atomic(str(src), _detect(src), str(ws))
-        check("⚠ 확인: 사전조건이 깨지면 예외 없이 조용히 실패하지 않고 예외가 남", False, "예외가 발생하지 않음")
-    except (FileExistsError, NotADirectoryError, OSError) as exc:
-        # ⚠ 확인된 문제: 원본_보관/마스킹완료 mkdir()은 process_atomic의 try 블록 밖에
-        # 있어서, 이 경우 예외가 그대로 호출자(main.py)까지 전파됨 -- main.py는 이걸
-        # try/except로 감싸지 않으므로 사용자에게는 파이썬 트레이스백이 그대로 노출됨
-        # (설계서 6.5.3 "오류 메시지에 원문 텍스트 미노출"은 지켜지지만, 사용자 친화적인
-        # 처리 실패 메시지 대신 스택트레이스가 뜨는 건 실사용성 관점의 미비점)
-        check("⚠ 참고: mkdir 실패는 process_atomic의 원자적 try 블록 밖이라 예외가 그대로 전파됨 (문서화된 사실로 기록)",
-              True, f"{type(exc).__name__}: {exc}")
+    # 수정 전: mkdir()이 process_atomic()의 try 블록 밖에 있어 예외가 호출자(main.py)까지
+    # 그대로 전파돼 사용자에게 파이썬 트레이스백이 노출됐다. mkdir을 자체 try/except로
+    # 감싸도록 고쳐서, 지금은 예외 없이 깔끔한 실패 결과가 돌아온다.
+    result = process_atomic(str(src), _detect(src), str(ws))
+    check("예외 없이 깔끔한 실패 결과가 돌아옴(트레이스백 노출 안 됨)", not result.success)
+    check("에러 사유가 workspace_setup_failed로 분류됨", result.error.startswith("workspace_setup_failed"), result.error)
     check("원본은 그대로 남아있음(옮겨지지 않음)", src.exists())
 
 
@@ -170,7 +165,7 @@ def main():
     tests = [
         test_filename_collision_gets_numbered_not_overwritten,
         test_log_accumulates_across_multiple_runs,
-        test_workspace_precondition_broken_raises_uncaught,
+        test_workspace_precondition_broken_fails_cleanly,
         test_real_commit_failure_via_immutable_log_dir,
     ]
     for t in tests:

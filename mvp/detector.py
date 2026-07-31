@@ -141,7 +141,11 @@ def detect_names(text: str) -> list[Finding]:
 
 def detect_addresses(text: str) -> list[Finding]:
     out = []
-    region_pattern = re.compile("|".join(re.escape(r) for r in sorted(REGIONS, key=len, reverse=True)))
+    # 지역명 뒤에 한글이 없어도(다른 지역명과 연달아 붙어도) 되지만, 앞에 한글이 있으면
+    # 다른 단어 중간의 부분 문자열(예: "해운대구" 안의 "대구", "서인천지사" 안의 "인천")일
+    # 가능성이 높아 제외 (실측으로 발견된 오탐 원인 -> 단어 경계 lookbehind로 보완)
+    region_alt = "|".join(re.escape(r) for r in sorted(REGIONS, key=len, reverse=True))
+    region_pattern = re.compile(r"(?<![가-힣])(?:" + region_alt + r")")
     for m in region_pattern.finditer(text):
         line_end = text.find("\n", m.end())
         if line_end == -1:

@@ -3,3 +3,14 @@ __pycache__/
 *.tmp
 mvp/_dummy_audit_file.pdf
 mvp/_dummy_audit_file_masked.pdf
+
+# PyInstaller 패키징 산출물 (6번 항목 검증용, 커밋 대상 아님)
+build/
+dist/
+*.spec
+
+# 실행 시 생성되는 출력 폴더 (더미 테스트 산출물)
+mvp/원본_보관/
+mvp/마스킹완료/
+mvp/요약리포트/
+mvp/로그/

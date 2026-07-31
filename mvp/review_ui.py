@@ -3,20 +3,24 @@
 
 - 기본값: 전체 승인 상태(체크됨) — 검토자는 틀린 것만 체크 해제
 - "업무상 성명 후보"는 별도로 묶어 보여주되, 기본 마스킹 대상인 건 동일 (6.2/6.3 정책)
+- 문서 유형 선택(6.3) — 결과 파일명 규칙(6.6)에 사용
 - "승인" 버튼을 눌러야 다음 단계(마스킹)로 넘어감
 
 MVP 범위: 사이드바 항목 점프, 단축키, 실행취소(Undo) 등은 향후 확장으로 남겨두고
-"전체승인 + 예외 해제"라는 핵심 동작만 구현.
+"전체승인 + 예외 해제" + "문서 유형 선택"이라는 핵심 동작만 구현.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QHBoxLayout, QLabel,
+    QApplication, QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel,
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from detector import Finding
+from output import DOCUMENT_TYPES
 
 
 class ReviewWindow(QDialog):
@@ -27,12 +31,22 @@ class ReviewWindow(QDialog):
         self.findings = findings
         self.checkboxes: list[tuple[QCheckBox, Finding]] = []
         self.approved_result: bool | None = None  # None=닫힘/취소, True=승인
+        self.doc_type: str = DOCUMENT_TYPES[0]
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
             f"<b>{filename}</b> — 탐지된 개인정보 {len(findings)}건. "
             "기본적으로 전부 마스킹 대상입니다. 마스킹하면 안 되는 항목만 체크 해제하세요."
         ))
+
+        doc_type_row = QHBoxLayout()
+        doc_type_row.addWidget(QLabel("문서 유형 (결과 파일명에 사용):"))
+        self.doc_type_combo = QComboBox()
+        self.doc_type_combo.addItems(DOCUMENT_TYPES)
+        self.doc_type_combo.currentTextChanged.connect(self._on_doc_type_changed)
+        doc_type_row.addWidget(self.doc_type_combo)
+        doc_type_row.addStretch()
+        layout.addLayout(doc_type_row)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -81,17 +95,27 @@ class ReviewWindow(QDialog):
         for cb, _ in self.checkboxes:
             cb.setChecked(checked)
 
+    def _on_doc_type_changed(self, text: str):
+        self.doc_type = text
+
     def _on_approve(self):
         for cb, f in self.checkboxes:
             f.approved = cb.isChecked()
+        self.doc_type = self.doc_type_combo.currentText()
         self.approved_result = True
         self.accept()
 
 
+@dataclass
+class ReviewResult:
+    findings: list[Finding]
+    doc_type: str
+
+
 def run_review(
     filename: str, findings: list[Finding], _auto_approve_after_ms: int | None = None
-) -> list[Finding] | None:
-    """검토 화면을 띄우고, 승인되면 approved 플래그가 반영된 findings를,
+) -> ReviewResult | None:
+    """검토 화면을 띄우고, 승인되면 approved 플래그가 반영된 findings와 선택한 문서 유형을,
     취소/닫힘이면 None을 반환.
 
     _auto_approve_after_ms: 실사용에서는 쓰지 않음. 화면이 없는 환경(headless)에서
@@ -104,5 +128,5 @@ def run_review(
         QTimer.singleShot(_auto_approve_after_ms, window._on_approve)
     window.exec()
     if window.approved_result:
-        return findings
+        return ReviewResult(findings, window.doc_type)
     return None

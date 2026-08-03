@@ -42,7 +42,8 @@ def process_file(input_path: str, output_path: str | None = None,
         return 1
 
     print(f"[{src.name}] {len(findings)}건 탐지됨 -> 검토 화면 표시")
-    reviewed = run_review(src.name, findings, full_text, spans, total_pages, _auto_approve_after_ms)
+    reviewed = run_review(src.name, findings, full_text, spans, total_pages, input_path,
+                           _auto_approve_after_ms=_auto_approve_after_ms)
     if reviewed is None:
         print(f"[{src.name}] 검토가 취소되었습니다. 처리하지 않음.")
         return 2

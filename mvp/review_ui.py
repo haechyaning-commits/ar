@@ -24,11 +24,17 @@
   점프하는 용도로만 쓰고(눌러야 검토완료 처리되는 게 아님), 배지로 페이지별
   탐지 건수를 보여줌. "안 본 페이지만 보기" 필터·경고 페이지 색 강조는 아직
   미구현(향후 확장).
+- 수동 추가 (6.3.1): "직접 추가" 버튼을 누르면 page_viewer.PageViewerDialog가
+  뜸 -- PDF 페이지를 이미지로 렌더링해서 보여주고, 드래그(영역 지정)/클릭(단어
+  하나)/텍스트 직접 입력(문서 전체 검색, 6.3.3과 같은 find_occurrences 재사용)
+  세 가지 방식으로 자동탐지가 놓친 항목을 추가할 수 있음. 대화상자가 닫히면
+  거기서 추가된 항목들이 이 검토 목록에도 그대로 반영됨(같은 findings 리스트를
+  공유하므로 이미 findings에는 들어가 있고, 체크박스 행/페이지 진행바만 새로 반영).
 - "승인" 버튼을 눌러야 다음 단계(마스킹)로 넘어감
 
 MVP 범위: 사이드바 항목 점프, 단축키, 실행취소(Undo) 등은 향후 확장으로 남겨두고
 "전체승인 + 예외 해제" + "저신뢰 우선 정렬" + "동일 값 일괄 처리" + "페이지 단위
-진행 상태 표시"까지만 구현.
+진행 상태 표시" + "수동 추가"까지 구현.
 """
 from __future__ import annotations
 
@@ -39,21 +45,24 @@ from PySide6.QtWidgets import (
 )
 
 from detector import CONFIDENCE_LEVELS, Finding, find_occurrences
+from page_viewer import PageViewerDialog
 from pdf_extract import SpanRef, page_of
 
 
 class ReviewWindow(QDialog):
     def __init__(
         self, filename: str, findings: list[Finding], full_text: str = "",
-        spans: list[SpanRef] | None = None, total_pages: int = 1,
+        spans: list[SpanRef] | None = None, total_pages: int = 1, input_path: str = "",
     ):
         super().__init__()
         self.setWindowTitle(f"검토 - {filename}")
         self.resize(560, 520)
+        self.filename = filename
         self.findings = findings
         self.full_text = full_text
         self.spans = spans or []
         self.total_pages = max(total_pages, 1)
+        self.input_path = input_path
         self.checkboxes: list[tuple[QCheckBox, Finding]] = []
         self.finding_page: dict[int, int] = {}  # id(finding) -> page_index
         self.page_buttons: dict[int, QPushButton] = {}
@@ -109,10 +118,14 @@ class ReviewWindow(QDialog):
         select_all.clicked.connect(lambda: self._set_all(True))
         deselect_all = QPushButton("전체 해제")
         deselect_all.clicked.connect(lambda: self._set_all(False))
-        approve = QPushButton("승인 (마스킹 진행)")
-        approve.clicked.connect(self._on_approve)
         btn_row.addWidget(select_all)
         btn_row.addWidget(deselect_all)
+        if self.input_path:
+            manual_add = QPushButton("직접 추가 (드래그·클릭·텍스트)")
+            manual_add.clicked.connect(self._open_manual_add)
+            btn_row.addWidget(manual_add)
+        approve = QPushButton("승인 (마스킹 진행)")
+        approve.clicked.connect(self._on_approve)
         btn_row.addStretch()
         btn_row.addWidget(approve)
         layout.addLayout(btn_row)
@@ -199,6 +212,8 @@ class ReviewWindow(QDialog):
             tags.append("업무상 성명 후보")
         if f.group == "동일값추가":
             tags.append("동일 값 일괄 추가")
+        if f.group == "수동추가":
+            tags.append("6.3.1 수동 추가")
         if f.cross_validated:
             tags.append("6.2.3 교차검증 반영")
         cb = QCheckBox(f"[{f.type}] {f.value} ({', '.join(tags)})")
@@ -267,6 +282,18 @@ class ReviewWindow(QDialog):
                 self.findings.append(new_f)
                 self._add_row_before_stretch(new_f)
 
+    def _open_manual_add(self):
+        # 6.3.1: 아직 검토완료로 안 넘어간 페이지가 있으면 거기서 시작 -- 어차피
+        # 승인 전에 한 번은 봐야 하는 페이지이므로 자연스러운 시작점
+        start_page = next((p for p, seen in sorted(self.page_reviewed.items()) if not seen), 0)
+        dlg = PageViewerDialog(self.filename, self.input_path, self.full_text, self.spans,
+                                self.findings, start_page)
+        dlg.exec()
+        # dlg.findings는 self.findings와 같은 리스트(참조 공유)라 이미 반영돼 있음 --
+        # 여기서는 체크박스 행/페이지 진행바만 새로 추가된 만큼 따라잡으면 됨
+        for f in dlg.new_findings:
+            self._add_row_before_stretch(f)
+
     def _on_approve(self):
         self._check_visible_rows()  # 마지막으로 화면에 있는 상태를 승인 직전 한 번 더 반영
         unreviewed = [p + 1 for p, seen in sorted(self.page_reviewed.items()) if not seen]
@@ -286,7 +313,7 @@ class ReviewWindow(QDialog):
 
 def run_review(
     filename: str, findings: list[Finding], full_text: str = "",
-    spans: list[SpanRef] | None = None, total_pages: int = 1,
+    spans: list[SpanRef] | None = None, total_pages: int = 1, input_path: str = "",
     _auto_approve_after_ms: int | None = None,
 ) -> list[Finding] | None:
     """검토 화면을 띄우고, 승인되면 approved 플래그가 반영된 findings를,
@@ -295,12 +322,14 @@ def run_review(
     full_text/spans: 6.3.3(동일 값 일괄 처리)과 6.3.4(페이지 단위 진행 상태
     표시)가 각각 문서 전체 검색과 페이지 판별에 씀.
     total_pages: 6.3.4 진행바에 표시할 전체 페이지 수.
+    input_path: 6.3.1(수동 추가) 화면이 PDF 페이지를 다시 렌더링할 때 필요한
+    원본 파일 경로. 비어 있으면 "직접 추가" 버튼 자체를 표시하지 않음.
     _auto_approve_after_ms: 실사용에서는 쓰지 않음. 화면이 없는 환경(headless)에서
     통합 테스트할 때만 사용 — 지정한 시간 뒤 모든 페이지를 확인 표시하고
     승인 버튼을 누른 것처럼 동작(6.3.4 도입 후에도 자동 테스트가 막히지 않도록).
     """
     app = QApplication.instance() or QApplication([])
-    window = ReviewWindow(filename, findings, full_text, spans, total_pages)
+    window = ReviewWindow(filename, findings, full_text, spans, total_pages, input_path)
     if _auto_approve_after_ms is not None:
         from PySide6.QtCore import QTimer
 

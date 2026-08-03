@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 import fitz  # PyMuPDF
 
 from detector import Finding
-from pdf_extract import SpanRef, extract_text_and_spans, spans_covering
+from pdf_extract import SpanRef, extract_text_and_spans, rects_for_range
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +103,8 @@ def _plan_for_finding(f: Finding, full_text: str, spans: list[SpanRef]):
     """f.start:f.end 위치가 실제로 f.value와 일치하는지 확인하고,
     그 구간과 겹치는 스팬(들)에 대한 (page_index, rect, masked_segment, baseline, fontsize) 계획을 만든다.
     구간이 여러 스팬에 걸쳐 있어도(폰트가 중간에 바뀌는 등) 스팬별로 나눠서 처리한다.
+    좌표 계산 자체는 pdf_extract.rects_for_range가 담당 (6.3.1 수동 추가 화면의
+    기존 항목 오버레이 표시와 공유하는 로직).
     """
     if full_text[f.start:f.end] != f.value:
         # 탐지 시점 오프셋과 현재 문서가 어긋남(방어적 점검) -> 위치를 못 찾은 것으로
@@ -119,18 +121,9 @@ def _plan_for_finding(f: Finding, full_text: str, spans: list[SpanRef]):
         return []
 
     plans = []
-    for span in spans_covering(spans, f.start, f.end):
-        local_lo = max(f.start, span.start) - span.start
-        local_hi = min(f.end, span.end) - span.start
-        seg_lo = max(f.start, span.start) - f.start
-        seg_hi = min(f.end, span.end) - f.start
-
-        prefix_width = fitz.get_text_length(span.text[:local_lo], fontname="korea", fontsize=span.fontsize)
-        seg_width = fitz.get_text_length(span.text[local_lo:local_hi], fontname="korea", fontsize=span.fontsize)
-        ox, oy = span.origin
-        rect = fitz.Rect(ox + prefix_width, span.bbox[1], ox + prefix_width + seg_width, span.bbox[3])
-        baseline = (ox + prefix_width, oy)
-        plans.append((span.page_index, rect, masked[seg_lo:seg_hi], baseline, span.fontsize))
+    for rp in rects_for_range(full_text, spans, f.start, f.end):
+        rect = fitz.Rect(*rp.rect)
+        plans.append((rp.page_index, rect, masked[rp.seg_lo:rp.seg_hi], rp.baseline, rp.fontsize))
     return plans
 
 

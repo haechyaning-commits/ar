@@ -261,6 +261,30 @@ def find_occurrences(text: str, value: str) -> list[tuple[int, int]]:
     return out
 
 
+def classify_value(value: str) -> str:
+    """검토자가 6.3.1(드래그/클릭/텍스트 입력)로 직접 고른 문자열이 어떤 유형처럼
+    보이는지 형식만으로 추정한다. 미리 유형을 골라야만 추가할 수 있으면 여러
+    유형을 섞어 추가할 때마다 드롭다운을 매번 바꿔야 해서 번거로우므로, 추가할 때
+    자동으로 맞춰주고 확신이 안 서면(라벨/사전 문맥 규칙까지는 재현하지 않으므로)
+    "기타"를 돌려줘서 검토자가 마지막으로 확인하게 함.
+    """
+    if PHONE_RE.fullmatch(value):
+        return "전화번호"
+    if EMAIL_RE.fullmatch(value):
+        return "이메일"
+    if RRN_RE.fullmatch(value) and _rrn_checksum_valid(value):
+        return "주민등록번호"
+    if PASSPORT_RE.fullmatch(value):
+        return "여권번호"
+    if ACCOUNT_RE.fullmatch(value):
+        return "계좌번호"
+    if HANGUL_RUN_RE.fullmatch(value) and _is_surname_word(value):
+        return "이름"
+    if any(r in value for r in REGIONS):
+        return "주소"
+    return "기타"
+
+
 def _dedupe(findings: list[Finding]) -> list[Finding]:
     # 같은 위치(start/end)가 서로 다른 규칙에 동시에 걸리는 경우가 있음
     # (예: "계좌" 라벨 근처의 전화번호가 전화번호+계좌번호로 이중 탐지됨) -> 하나만 남김

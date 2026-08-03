@@ -32,6 +32,16 @@ class SpanRef:
     end: int     # start + len(text)
 
 
+@dataclass
+class RectPlan:
+    page_index: int
+    rect: tuple[float, float, float, float]  # (x0, y0, x1, y1) -- 이 구간의 시각적 영역
+    baseline: tuple[float, float]            # 텍스트를 다시 그릴 때 쓸 기준점
+    fontsize: float
+    seg_lo: int  # 요청한 (start, end) 안에서 이 조각이 시작하는 상대 위치
+    seg_hi: int  # 요청한 (start, end) 안에서 이 조각이 끝나는 상대 위치
+
+
 def extract_text_and_spans(doc: fitz.Document) -> tuple[str, list[SpanRef]]:
     parts: list[str] = []
     spans: list[SpanRef] = []
@@ -80,3 +90,100 @@ def page_of(spans: list[SpanRef], pos: int) -> int:
         if s.start <= pos < s.end:
             return s.page_index
     return 0
+
+
+def rects_for_range(full_text: str, spans: list[SpanRef], start: int, end: int) -> list[RectPlan]:
+    """[start, end) 구간과 겹치는 스팬(들)에 대한 실제 좌표 계획을 만든다.
+    masker.py(실제 리댁션 위치 계산)와 6.3.1 수동 추가 화면(기존 탐지 항목을
+    페이지 이미지 위에 오버레이로 보여줄 때)이 공유하는 좌표 계산 로직 -- 두 곳이
+    각자 따로 계산하면 나중에 어긋날 수 있어 한 곳으로 모음.
+
+    호출하는 쪽에서 미리 full_text[start:end]가 기대하는 값과 같은지 확인하는 걸
+    전제로 함 (이 함수 자체는 그 검증을 하지 않음).
+    """
+    out = []
+    for span in spans_covering(spans, start, end):
+        local_lo = max(start, span.start) - span.start
+        local_hi = min(end, span.end) - span.start
+        seg_lo = max(start, span.start) - start
+        seg_hi = min(end, span.end) - start
+
+        prefix_width = fitz.get_text_length(span.text[:local_lo], fontname="korea", fontsize=span.fontsize)
+        seg_width = fitz.get_text_length(span.text[local_lo:local_hi], fontname="korea", fontsize=span.fontsize)
+        ox, oy = span.origin
+        rect = (ox + prefix_width, span.bbox[1], ox + prefix_width + seg_width, span.bbox[3])
+        baseline = (ox + prefix_width, oy)
+        out.append(RectPlan(span.page_index, rect, baseline, span.fontsize, seg_lo, seg_hi))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 6.3.1 수동 추가 (클릭/드래그) -- 화면 좌표를 다시 full_text의 (start, end)로
+# ---------------------------------------------------------------------------
+def _resolve_word_offset(spans: list[SpanRef], page_index: int, word: str, x0: float, y0: float) -> tuple[int, int] | None:
+    """이 페이지에서 word와 텍스트가 같고 y가 겹치는 스팬들 중, x0에 가장 가까운
+    위치를 골라 (start, end)를 돌려준다. 같은 단어가 한 줄에 여러 번 나오는
+    경우(드문 case)에 좌표로 구분하기 위함."""
+    best = None
+    best_dist = None
+    for span in spans:
+        if span.page_index != page_index or word not in span.text:
+            continue
+        if not (span.bbox[1] - 1 <= y0 <= span.bbox[3] + 1):
+            continue
+        idx = 0
+        while (local := span.text.find(word, idx)) != -1:
+            prefix_width = fitz.get_text_length(span.text[:local], fontname="korea", fontsize=span.fontsize)
+            candidate_x = span.origin[0] + prefix_width
+            dist = abs(candidate_x - x0)
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best = (span.start + local, span.start + local + len(word))
+            idx = local + len(word)
+    return best
+
+
+def resolve_word_at(
+    full_text: str, page: fitz.Page, spans: list[SpanRef], page_index: int, point: tuple[float, float],
+) -> tuple[int, int, str] | None:
+    """point(PDF 좌표, 페이지 page_index 위)와 겹치는 단어를 찾아 (start, end, value)를
+    돌려준다. 6.3.1 클릭 입력에 씀. 겹치는 단어가 없으면(빈 공간 클릭) None."""
+    px, py = point
+    for x0, y0, x1, y1, word, *_ in page.get_text("words"):
+        if x0 <= px <= x1 and y0 <= py <= y1:
+            resolved = _resolve_word_offset(spans, page_index, word, x0, y0)
+            if resolved is None:
+                return None
+            start, end = resolved
+            return (start, end, full_text[start:end])
+    return None
+
+
+def resolve_region(
+    full_text: str, page: fitz.Page, spans: list[SpanRef], page_index: int,
+    rect: tuple[float, float, float, float],
+) -> tuple[int, int, str] | None:
+    """rect(PDF 좌표, 페이지 page_index 위)와 절반 이상 겹치는 단어들을 모아
+    첫 단어 시작 ~ 마지막 단어 끝을 (start, end, value)로 돌려준다. 6.3.1 드래그
+    입력에 씀. 영역 안에 인식 가능한 텍스트가 하나도 없으면(이미지/도장 등) None
+    -- 이 도구는 텍스트 기반 마스킹만 지원하므로, 텍스트 없는 영역의 순수 그래픽
+    리댁션은 아직 지원하지 않음(향후 확장 후보)."""
+    rx0, ry0, rx1, ry1 = rect
+    resolved: list[tuple[int, int]] = []
+    for x0, y0, x1, y1, word, *_ in page.get_text("words"):
+        ix0, iy0 = max(x0, rx0), max(y0, ry0)
+        ix1, iy1 = min(x1, rx1), min(y1, ry1)
+        if ix1 <= ix0 or iy1 <= iy0:
+            continue
+        overlap = (ix1 - ix0) * (iy1 - iy0)
+        area = max((x1 - x0) * (y1 - y0), 1e-6)
+        if overlap / area < 0.5:
+            continue
+        r = _resolve_word_offset(spans, page_index, word, x0, y0)
+        if r is not None:
+            resolved.append(r)
+    if not resolved:
+        return None
+    start = min(s for s, _ in resolved)
+    end = max(e for _, e in resolved)
+    return (start, end, full_text[start:end])

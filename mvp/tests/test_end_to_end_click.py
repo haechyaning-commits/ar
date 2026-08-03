@@ -62,7 +62,13 @@ def test_end_to_end_via_real_clicks():
     doc.close()
 
     QTimer.singleShot(300, click_review_dialog_uncheck_first_then_approve)
-    rc = main_module.process_file(str(src), str(workspace))
+    # _auto_processor_name: 처리자 이름을 물어보는 QInputDialog는 헤드리스 환경에서
+    # 응답할 사람이 없어 그대로 두면 멈춘다 -- 테스트 전용 훅으로 자동 응답.
+    # _auto_reprocess_confirm: 이번 실행은 새 파일이라 재실행 확인창 자체가 뜨지
+    # 않지만, 다른 테스트가 이 워크스페이스를 재사용하게 되는 경우를 대비해 방어적으로 지정.
+    rc = main_module.process_file(str(src), str(workspace),
+                                   _auto_processor_name="테스트담당자",
+                                   _auto_reprocess_confirm=True)
 
     check("반환 코드 0(성공)", rc == 0, str(rc))
 

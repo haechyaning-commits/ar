@@ -168,7 +168,11 @@ def detect_addresses(text: str) -> list[Finding]:
             line_end = len(text)
         raw = text[lm.end():line_end]
         value = raw.strip()
-        if not value or not region_pattern.match(value):
+        if not value:
+            continue
+        m = region_pattern.match(value)
+        if not m or len(value) == len(m.group()):
+            # 지역명 단독(예: "주소: 서울")은 상세 주소가 아니므로 대상에서 제외
             continue
         start = lm.end() + raw.find(value)
         out.append(Finding("주소", value, start, start + len(value), confidence="낮음"))

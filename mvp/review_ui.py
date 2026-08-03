@@ -30,21 +30,27 @@
   세 가지 방식으로 자동탐지가 놓친 항목을 추가할 수 있음. 대화상자가 닫히면
   거기서 추가된 항목들이 이 검토 목록에도 그대로 반영됨(같은 findings 리스트를
   공유하므로 이미 findings에는 들어가 있고, 체크박스 행/페이지 진행바만 새로 반영).
+- 문서 유형 선택: 결과 파일명 규칙(6.6, `[문서유형]_[처리일자]_[일련번호].pdf`)에
+  쓸 문서유형을 검토자가 직접 고름 -- 자동 판별하지 않음(설계서 6.6: "문서유형은
+  검토 단계에서 사람이 직접 선택")
 - "승인" 버튼을 눌러야 다음 단계(마스킹)로 넘어감
 
 MVP 범위: 사이드바 항목 점프, 단축키, 실행취소(Undo) 등은 향후 확장으로 남겨두고
 "전체승인 + 예외 해제" + "저신뢰 우선 정렬" + "동일 값 일괄 처리" + "페이지 단위
-진행 상태 표시" + "수동 추가"까지 구현.
+진행 상태 표시" + "수동 추가" + "문서 유형 선택"까지 구현.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QHBoxLayout, QLabel, QMenu,
+    QApplication, QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QMenu,
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from detector import CONFIDENCE_LEVELS, Finding, find_occurrences
+from output import DOCUMENT_TYPES
 from page_viewer import PageViewerDialog
 from pdf_extract import SpanRef, page_of
 
@@ -69,12 +75,22 @@ class ReviewWindow(QDialog):
         self.page_counts: dict[int, int] = {}
         self.page_reviewed: dict[int, bool] = {}  # 스크롤로 실제 화면에 보인 적 있는 페이지
         self.approved_result: bool | None = None  # None=닫힘/취소, True=승인
+        self.doc_type: str = DOCUMENT_TYPES[0]
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
             f"<b>{filename}</b> — 탐지된 개인정보 {len(findings)}건. "
             "기본적으로 전부 마스킹 대상입니다. 마스킹하면 안 되는 항목만 체크 해제하세요."
         ))
+
+        doc_type_row = QHBoxLayout()
+        doc_type_row.addWidget(QLabel("문서 유형 (결과 파일명에 사용):"))
+        self.doc_type_combo = QComboBox()
+        self.doc_type_combo.addItems(DOCUMENT_TYPES)
+        self.doc_type_combo.currentTextChanged.connect(self._on_doc_type_changed)
+        doc_type_row.addWidget(self.doc_type_combo)
+        doc_type_row.addStretch()
+        layout.addLayout(doc_type_row)
 
         for f in findings:
             self.finding_page[id(f)] = page_of(self.spans, f.start)
@@ -246,6 +262,9 @@ class ReviewWindow(QDialog):
         for cb, _ in self.checkboxes:
             cb.setChecked(checked)
 
+    def _on_doc_type_changed(self, text: str):
+        self.doc_type = text
+
     def _show_context_menu(self, cb: QCheckBox, f: Finding, pos):
         # 6.3.3: 문서 전체에서 같은 문자열이 몇 곳에 더 있는지 찾아 일괄 선택/해제 제공.
         # full_text가 없으면(테스트 등) 현재 목록에 있는 항목끼리만이라도 동작하게 함.
@@ -307,17 +326,24 @@ class ReviewWindow(QDialog):
             return
         for cb, f in self.checkboxes:
             f.approved = cb.isChecked()
+        self.doc_type = self.doc_type_combo.currentText()
         self.approved_result = True
         self.accept()
+
+
+@dataclass
+class ReviewResult:
+    findings: list[Finding]
+    doc_type: str
 
 
 def run_review(
     filename: str, findings: list[Finding], full_text: str = "",
     spans: list[SpanRef] | None = None, total_pages: int = 1, input_path: str = "",
     _auto_approve_after_ms: int | None = None,
-) -> list[Finding] | None:
-    """검토 화면을 띄우고, 승인되면 approved 플래그가 반영된 findings를,
-    취소/닫힘이면 None을 반환.
+) -> ReviewResult | None:
+    """검토 화면을 띄우고, 승인되면 approved 플래그가 반영된 findings와 선택한
+    문서 유형을 ReviewResult로, 취소/닫힘이면 None을 반환.
 
     full_text/spans: 6.3.3(동일 값 일괄 처리)과 6.3.4(페이지 단위 진행 상태
     표시)가 각각 문서 전체 검색과 페이지 판별에 씀.
@@ -340,5 +366,5 @@ def run_review(
         QTimer.singleShot(_auto_approve_after_ms, _auto)
     window.exec()
     if window.approved_result:
-        return window.findings
+        return ReviewResult(window.findings, window.doc_type)
     return None

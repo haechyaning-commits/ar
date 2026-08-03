@@ -6,9 +6,10 @@
   문서유형은 자동판정하지 않고 검토 화면(6.3)에서 검토자가 직접 고른 값을 사용.
 - 원본: 처리 완료 후 삭제하지 않고 원본_보관/ 폴더로 이동 (매핑은 로그 6.7 참고)
 
-재실행(중복 마스킹) 방지(6.4)는 별도 기능이라 이 모듈 범위 밖 -- 그 기능이 붙기
-전까지는 같은 원본을 두 번 처리하면 결과물 파일명 일련번호만 늘어날 뿐, 중복
-처리 자체를 막지는 않음.
+- is_in_masked_dir(): 재실행(중복 마스킹) 방지(6.4)의 감지 방법 ① -- 입력 파일이
+  마스킹완료/ 폴더 경로 안에 있으면(=이미 만들어진 결과물을 다시 넣은 경우) 감지.
+  감지 방법 ②(문서 속성 마커)는 masker.has_processed_marker() 담당, 확인 절차는
+  main.py 담당.
 """
 from __future__ import annotations
 
@@ -79,3 +80,9 @@ def archive_original(input_path: str, base_dir: Path) -> Path:
     dest = _unique_destination(original_dir, Path(input_path).name)
     shutil.move(input_path, dest)
     return dest
+
+
+def is_in_masked_dir(path: str | Path) -> bool:
+    """6.4 감지 방법 ①: 파일명 규칙(v8부터 [문서유형]_[일자]_[일련번호])은
+    더 이상 신뢰할 수 없어, 경로 자체가 마스킹완료/ 폴더 안인지로 판별."""
+    return MASKED_DIR_NAME in Path(path).parts

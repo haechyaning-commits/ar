@@ -1,13 +1,12 @@
 """
 MVP 통합 진입점.
 
-범위(설계서 기준 MVP): PDF 입력만 지원(hwp/hwpx 변환 어댑터는 제외),
-탐지 -> 최소 검토(전체승인+예외해제, 문서유형 선택, 수동추가) -> 실제 마스킹+자체검증
-(실패 시 검토 화면 복귀, 6.5.1) -> 파일명 규칙에 맞춰 저장(6.6) -> 원본 보관 이동(6.6)
--> 로그/요약리포트 기록(6.7, 6.8). 여러 파일은 process_batch()로 대기열 순차 처리(7번
-정책표) -- 배치 자동처리가 아니라 파일마다 검토 화면을 거침.
-
-재실행(중복 마스킹) 방지(6.4)는 MVP 범위 밖으로 남겨둠 (설계서 "제외 (나중에)" 항목).
+범위(설계서 기준 MVP): PDF 입력만 지원(hwp/hwpx 변환 어댑터는 제외), 재실행(중복
+마스킹) 방지(6.4) -> 탐지 -> 최소 검토(전체승인+예외해제, 문서유형 선택, 수동추가)
+-> 실제 마스킹+자체검증(실패 시 검토 화면 복귀, 6.5.1) -> 파일명 규칙에 맞춰
+저장(6.6) -> 원본 보관 이동(6.6) -> 로그/요약리포트 기록(6.7, 6.8). 여러 파일은
+process_batch()로 대기열 순차 처리(7번 정책표) -- 배치 자동처리가 아니라 파일마다
+검토 화면을 거침.
 
 실제 감사파일이 아닌 더미 데이터로만 테스트할 것 (2.1 선행 조건).
 """
@@ -19,18 +18,19 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 
-from archive import archive_original, build_output_path
+from archive import archive_original, build_output_path, is_in_masked_dir
 from detector import detect_all
 from logger import record_processing
-from masker import mask_pdf
-from review_ui import run_review
+from masker import has_processed_marker, mask_pdf
+from review_ui import confirm_reprocess, run_review
 
 
 def process_file(input_path: str, output_path: str | None = None,
-                  _auto_approve_after_ms: int | None = None) -> int:
+                  _auto_approve_after_ms: int | None = None,
+                  _auto_confirm_reprocess: bool | None = None) -> int:
     """반환값: 0=성공, 1=탐지 없음(그대로 종료), 2=검토 취소,
     3=자체검증 실패(헤드리스 모드에서만 -- 대화형에서는 검토 화면으로 복귀함),
-    4=원본 보관/로그 기록 실패(마스킹본·원본 롤백됨)
+    4=원본 보관/로그 기록 실패(마스킹본·원본 롤백됨), 5=재처리를 확인 후 취소함(6.4)
 
     output_path를 직접 지정하면 6.6 파일명 규칙([문서유형]_[일자]_[일련번호])을
     건너뛰고 그 경로에 그대로 저장 -- 테스트/디버그용 탈출구.
@@ -40,7 +40,18 @@ def process_file(input_path: str, output_path: str | None = None,
 
     doc = fitz.open(input_path)
     full_text = "\n".join(page.get_text(sort=True) for page in doc)
+    already_processed_reasons = []
+    if is_in_masked_dir(input_path):
+        already_processed_reasons.append("마스킹완료/ 폴더 안에 있는 파일입니다 (이미 만들어진 결과물일 수 있음)")
+    if has_processed_marker(doc):
+        already_processed_reasons.append("문서 속성에 이 도구의 처리완료 표시가 남아있습니다")
     doc.close()
+
+    if already_processed_reasons:
+        # 6.4: 완전 차단이 아니라 확인만 거치면 재처리 허용
+        if not confirm_reprocess(src.name, already_processed_reasons, _auto_confirm_reprocess):
+            print(f"[{src.name}] 이미 처리된 파일로 보여 재처리를 취소했습니다.")
+            return 5
 
     findings = detect_all(full_text)
     if not findings:
@@ -138,7 +149,10 @@ def process_batch(
     print(f"\n=== 배치 처리 완료: {succeeded}/{total}건 마스킹 완료 ===")
     for path, rc in results.items():
         if rc != 0:
-            reason = {1: "탐지된 개인정보 없음", 2: "검토 취소", 3: "자체검증 실패", 4: "롤백됨"}.get(rc, f"코드 {rc}")
+            reason = {
+                1: "탐지된 개인정보 없음", 2: "검토 취소", 3: "자체검증 실패",
+                4: "롤백됨", 5: "재처리 확인 후 취소됨",
+            }.get(rc, f"코드 {rc}")
             print(f"  - {Path(path).name}: {reason}")
     return results
 

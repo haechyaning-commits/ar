@@ -6,6 +6,7 @@
 - 회전 텍스트 경고 (6.5.1-4), 숨겨진 콘텐츠(주석/폼필드/첨부파일) 실제 스캔·제거 (6.5.1-2),
   메타데이터 제거 (6.5.1-3)
 - 처리 원자성 (6.5.2): 임시 파일에 먼저 쓰고, 검증 통과 후에만 최종 파일로 교체
+- 재실행 방지용 처리완료 마커를 메타데이터에 남김 (6.4, 감지·확인은 main.py 담당)
 
 실제 감사파일이 아닌 더미 데이터로만 테스트할 것 (2.1 선행 조건).
 """
@@ -222,12 +223,24 @@ def scrub_hidden_content(doc: fitz.Document, values) -> HiddenContentResult:
     return result
 
 
+# 재실행(중복 마스킹) 방지(6.4)용 표시 -- 개인정보가 아닌 값이라 로그/화면에
+# 노출돼도 무방. 파일명 규칙이 [문서유형]_[일자]_[일련번호]로 바뀌어(v8) 파일명
+# 기반 감지는 신뢰할 수 없으므로, 문서 속성에 남겨 재감지 가능하게 함.
+PROCESSED_MARKER = "MaskingTool-Processed"
+
+
 def scrub_metadata(doc: fitz.Document) -> None:
-    doc.set_metadata({})
+    # 메타데이터를 비우면서 재실행 방지용 마커만 keywords에 남김 (6.4)
+    doc.set_metadata({"keywords": PROCESSED_MARKER})
     try:
         doc.set_xml_metadata("")
     except Exception:
         pass
+
+
+def has_processed_marker(doc: fitz.Document) -> bool:
+    """6.4: 이미 이 도구로 처리된 결과물을 다시 입력으로 넣은 경우를 감지."""
+    return PROCESSED_MARKER in (doc.metadata or {}).get("keywords", "")
 
 
 # ---------------------------------------------------------------------------

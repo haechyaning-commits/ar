@@ -16,11 +16,33 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget,
+    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
+    QScrollArea, QVBoxLayout, QWidget,
 )
 
 from detector import Finding
+
+
+def confirm_reprocess(filename: str, reasons: list[str], _auto_confirm: bool | None = None) -> bool:
+    """6.4: 이미 처리된 것으로 보이는 파일을 다시 처리할지 확인.
+    완전 차단이 아니라 확인만 거치면 재처리를 허용 (마스킹 정책 변경 등으로
+    재작업이 필요한 실무 상황을 막지 않기 위함).
+
+    _auto_confirm: 헤드리스 테스트용 -- 지정하면 다이얼로그를 띄우지 않고
+    바로 이 값을 반환.
+    """
+    if _auto_confirm is not None:
+        return _auto_confirm
+    app = QApplication.instance() or QApplication([])
+    text = (
+        f"'{filename}'은(는) 이미 처리된 파일로 보입니다:\n- " + "\n- ".join(reasons)
+        + "\n\n다시 처리하시겠습니까?"
+    )
+    reply = QMessageBox.question(
+        None, "재처리 확인", text,
+        QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+    )
+    return reply == QMessageBox.Yes
 
 # 결과물 파일명([문서유형]_[처리일자]_[일련번호].pdf, 6.6)에 쓰일 값.
 # 자동탐지에 맡기지 않고 검토자가 직접 고르게 해 오분류 리스크를 피함 (6.6) --

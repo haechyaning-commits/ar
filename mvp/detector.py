@@ -52,6 +52,7 @@ class Finding:
     end: int
     group: str = "기본"       # 기본 | 업무상성명후보
     approved: bool = True     # 검토 화면 기본값: 전체 승인 (6.3)
+    source: str = "자동"      # 자동 | 수동 (6.3.1) -- 로그의 탐지출처 구분(6.7)에 사용
 
     def __repr__(self):
         return f"Finding({self.type!r}, {self.value!r}, [{self.start}:{self.end}], group={self.group!r})"

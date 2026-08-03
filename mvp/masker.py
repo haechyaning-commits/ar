@@ -180,7 +180,7 @@ def scrub_metadata(doc: fitz.Document) -> None:
 class MaskResult:
     success: bool
     output_path: str | None
-    masked_counts: dict[str, int] = field(default_factory=dict)
+    masked_counts: dict[str, dict[str, int]] = field(default_factory=dict)  # type -> {자동|수동: 건수} (6.7)
     leftover: list[str] = field(default_factory=list)
     rotated_text_warning: bool = False
     hidden_content_warning: bool = False
@@ -208,9 +208,10 @@ def mask_pdf(input_path: str, findings: list[Finding], output_path: str) -> Mask
     doc.close()
     os.replace(tmp_path, output_path)
 
-    counts: dict[str, int] = {}
+    counts: dict[str, dict[str, int]] = {}
     for f in findings:
         if f.approved:
-            counts[f.type] = counts.get(f.type, 0) + 1
+            by_source = counts.setdefault(f.type, {})
+            by_source[f.source] = by_source.get(f.source, 0) + 1
 
     return MaskResult(True, output_path, counts, [], rotated_warning, hidden_warning)

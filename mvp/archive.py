@@ -22,6 +22,16 @@ ORIGINAL_DIR_NAME = "원본_보관"
 
 _SERIAL_RE_TEMPLATE = r"^{doc_type}_{date_str}_(\d+)\.pdf$"
 
+# 직접 입력한 문서유형이 그대로 파일 경로 일부가 되므로(6.3), 경로 구분자는
+# 제거하고(안 그러면 의도치 않은 하위 폴더가 생김) 나머지 공백/특수문자는
+# 언더스코어로 치환.
+_UNSAFE_CHARS_RE = re.compile(r"[\\/:*?\"<>|\s]+")
+
+
+def sanitize_doc_type(doc_type: str) -> str:
+    cleaned = _UNSAFE_CHARS_RE.sub("_", doc_type.strip()).strip("_")
+    return cleaned or "기타"
+
 
 def _next_serial(masked_dir: Path, doc_type: str, date_str: str) -> int:
     if not masked_dir.exists():
@@ -42,6 +52,7 @@ def build_output_path(base_dir: Path, doc_type: str, today: date | None = None) 
     masked_dir = base_dir / MASKED_DIR_NAME
     masked_dir.mkdir(parents=True, exist_ok=True)
 
+    doc_type = sanitize_doc_type(doc_type)
     date_str = (today or date.today()).strftime("%Y%m%d")
     serial = _next_serial(masked_dir, doc_type, date_str)
     return masked_dir / f"{doc_type}_{date_str}_{serial:03d}.pdf"

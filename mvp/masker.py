@@ -3,7 +3,8 @@
 
 - 실제 리댁션(텍스트 레이어 제거) + 항목별 부분/완전마스킹 텍스트 재삽입
 - 저장 전 자체 재검증 (6.5.1-1): 재추출해서 승인된 값이 남아있으면 저장 중단
-- 회전 텍스트 경고 (6.5.1-4), 숨겨진 콘텐츠 경고 (6.5.1-2), 메타데이터 제거 (6.5.1-3)
+- 회전 텍스트 경고 (6.5.1-4), 숨겨진 콘텐츠(주석/폼필드/첨부파일) 실제 스캔·제거 (6.5.1-2),
+  메타데이터 제거 (6.5.1-3)
 - 처리 원자성 (6.5.2): 임시 파일에 먼저 쓰고, 검증 통과 후에만 최종 파일로 교체
 
 실제 감사파일이 아닌 더미 데이터로만 테스트할 것 (2.1 선행 조건).
@@ -61,6 +62,28 @@ def mask_full(value: str) -> str:
     return "".join("*" if c.isalnum() else c for c in value)
 
 
+# 9번 표(확인 필요한 가정): 계좌/카드번호는 완전마스킹이 잠정 스펙이지만,
+# 조회 가용성을 위해 끝자리를 남기는 부분마스킹으로 바뀔 수 있다고 명시돼 있음
+# -> 하드코딩하지 말고 여기 상수 하나만 바꾸면 정책을 전환할 수 있게 함.
+ACCOUNT_CARD_MASK_FULL = True  # True=완전마스킹(현재 잠정 스펙) / False=끝 4자리 유지
+
+
+def _mask_partial_keep_last(value: str, keep: int = 4) -> str:
+    """뒤에서 keep개의 영문/숫자만 남기고 나머지 영문/숫자는 마스킹, 구분자는 그대로 유지."""
+    alnum_positions = [i for i, c in enumerate(value) if c.isalnum()]
+    keep_positions = set(alnum_positions[-keep:])
+    return "".join(
+        c if (not c.isalnum()) or i in keep_positions else "*"
+        for i, c in enumerate(value)
+    )
+
+
+def mask_account_or_card(value: str) -> str:
+    if ACCOUNT_CARD_MASK_FULL:
+        return mask_full(value)
+    return _mask_partial_keep_last(value, keep=4)
+
+
 def mask_value(f: Finding) -> str:
     if f.type == "이름":
         return mask_name(f.value)
@@ -70,7 +93,9 @@ def mask_value(f: Finding) -> str:
         return mask_email(f.value)
     if f.type == "주소":
         return mask_address(f.value)
-    if f.type in ("주민등록번호", "여권번호", "계좌번호"):
+    if f.type in ("계좌번호", "카드번호"):
+        return mask_account_or_card(f.value)
+    if f.type in ("주민등록번호", "여권번호"):
         return mask_full(f.value)
     return "*" * len(f.value)
 
@@ -153,16 +178,48 @@ def has_rotated_text(doc: fitz.Document) -> bool:
     return False
 
 
-def has_hidden_content(doc: fitz.Document) -> bool:
+@dataclass
+class HiddenContentResult:
+    removed_annotations: int = 0
+    removed_widgets: int = 0
+    removed_attachments: int = 0
+    ocg_present: bool = False  # 존재만 감지 가능 -- 내용 스캔은 구조적으로 불가 (6.5.1-2)
+
+
+def scrub_hidden_content(doc: fitz.Document, values) -> HiddenContentResult:
+    """주석(annotation)/폼필드(widget)는 실제 텍스트 내용을 스캔해서 승인된 값이
+    있으면 통째로 제거. (버그: 이전엔 존재 여부만 확인하고 경고만 띄웠을 뿐 실제
+    내용을 스캔/제거하지 않아, 6.5.1이 "필수"로 요구하는 "발견 시 실제 제거"를
+    충족하지 못했음. field_value를 빈 값으로 바꾸는 API는 저장 후에도 원래 값이
+    남는 걸 실측으로 확인해, 값만 지우지 않고 항목 자체를 삭제하는 방식으로 처리.)
+
+    첨부파일(embedded file)은 형식이 PDF/이미지/오피스 문서 등으로 제각각이라
+    내용을 텍스트로 스캔하는 게 이 정규식 기반 탐지 엔진으로는 불가능함 -> 존재하면
+    안전하게 전부 제거(6.2의 "확실하지 않으면 가림" 원칙과 동일한 방향의 선택).
+
+    OCG(선택적 콘텐츠 레이어)는 설계서에 명시된 구조적 한계로 내용 스캔이
+    불가능해 존재 감지 + 경고만 유지."""
+    values = list(values)
+    result = HiddenContentResult()
+
     for page in doc:
-        if list(page.annots() or []):
-            return True
-        if page.first_widget is not None:
-            return True
-    if doc.embfile_count() > 0:
-        return True
-    # 설계서 6.5.1-2가 약속한 OCG(선택적 콘텐츠 레이어) 검사가 빠져있던 부분 -> 추가
-    return bool(doc.get_ocgs())
+        for annot in list(page.annots() or []):
+            content = (annot.info or {}).get("content", "")
+            if any(v in content for v in values):
+                page.delete_annot(annot)
+                result.removed_annotations += 1
+
+        for widget in list(page.widgets() or []):
+            if any(v in (widget.field_value or "") for v in values):
+                page.delete_widget(widget)
+                result.removed_widgets += 1
+
+    for name in doc.embfile_names():
+        doc.embfile_del(name)
+        result.removed_attachments += 1
+
+    result.ocg_present = bool(doc.get_ocgs())
+    return result
 
 
 def scrub_metadata(doc: fitz.Document) -> None:
@@ -183,22 +240,22 @@ class MaskResult:
     masked_counts: dict[str, dict[str, int]] = field(default_factory=dict)  # type -> {자동|수동: 건수} (6.7)
     leftover: list[str] = field(default_factory=list)
     rotated_text_warning: bool = False
-    hidden_content_warning: bool = False
+    hidden_content: HiddenContentResult = field(default_factory=HiddenContentResult)
 
 
 def mask_pdf(input_path: str, findings: list[Finding], output_path: str) -> MaskResult:
     doc = fitz.open(input_path)
 
     rotated_warning = has_rotated_text(doc)
-    hidden_warning = has_hidden_content(doc)
 
     value_to_masked = apply_masking(doc, findings)
+    hidden_content = scrub_hidden_content(doc, value_to_masked.keys())
     leftover = self_check(doc, value_to_masked.keys())
 
     if leftover:
         # 6.5.1: 재검증 실패 -> 저장 자체를 하지 않음, 원본/입력 파일 무변경
         doc.close()
-        return MaskResult(False, None, {}, leftover, rotated_warning, hidden_warning)
+        return MaskResult(False, None, {}, leftover, rotated_warning, hidden_content)
 
     scrub_metadata(doc)
 
@@ -214,4 +271,4 @@ def mask_pdf(input_path: str, findings: list[Finding], output_path: str) -> Mask
             by_source = counts.setdefault(f.type, {})
             by_source[f.source] = by_source.get(f.source, 0) + 1
 
-    return MaskResult(True, output_path, counts, [], rotated_warning, hidden_warning)
+    return MaskResult(True, output_path, counts, [], rotated_warning, hidden_content)

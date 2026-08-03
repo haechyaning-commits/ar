@@ -30,7 +30,7 @@ DOC_TYPES = ["지출결의서", "민원처리결과", "감사결과보고", "일
 # 수동 추가(6.3.1) 시 선택하는 유형. "기타"를 고르면(또는 아무 것도 못 고르는
 # 상황이면) masker.mask_value()가 모르는 유형이라 완전마스킹으로 처리됨 --
 # 이게 설계서가 요구하는 "미선택 시 기본값 완전마스킹"과 같은 효과를 냄.
-MANUAL_TYPES = ["이름", "전화번호", "이메일", "계좌번호", "주민등록번호", "여권번호", "주소", "기타"]
+MANUAL_TYPES = ["이름", "전화번호", "이메일", "계좌번호", "카드번호", "주민등록번호", "여권번호", "주소", "기타"]
 
 
 def find_occurrences(
@@ -52,12 +52,17 @@ def find_occurrences(
 
 
 class ReviewWindow(QDialog):
-    def __init__(self, filename: str, findings: list[Finding], full_text: str):
+    def __init__(
+        self, filename: str, findings: list[Finding], full_text: str,
+        retry_notice: str | None = None,
+        highlight_spans: set[tuple[int, int]] | None = None,
+    ):
         super().__init__()
         self.setWindowTitle(f"검토 - {filename}")
         self.resize(560, 560)
         self.findings = findings
         self.full_text = full_text
+        self.highlight_spans = highlight_spans or set()
         self.checkboxes: list[tuple[QCheckBox, Finding]] = []
         self.approved_result: bool | None = None  # None=닫힘/취소, True=승인
 
@@ -66,6 +71,12 @@ class ReviewWindow(QDialog):
             f"<b>{filename}</b> — 탐지된 개인정보 {len(findings)}건. "
             "기본적으로 전부 마스킹 대상입니다. 마스킹하면 안 되는 항목만 체크 해제하세요."
         ))
+
+        if retry_notice:
+            # 6.5.1: 재검증 실패 후 복귀 -- 실제 값은 보여주지 않고(6.5.3) 건수/안내만 표시
+            notice_label = QLabel(f"⚠ {retry_notice}")
+            notice_label.setStyleSheet("color: #b00020; font-weight: bold;")
+            layout.addWidget(notice_label)
 
         doc_type_row = QHBoxLayout()
         doc_type_row.addWidget(QLabel("문서유형 (결과 파일명에 사용됨):"))
@@ -227,6 +238,8 @@ class ReviewWindow(QDialog):
 
     def _add_row(self, layout: QVBoxLayout, f: Finding):
         marker = "[수동]" if f.source == "수동" else ""
+        if (f.start, f.end) in self.highlight_spans:
+            marker = "⚠[미제거]" + marker
         cb = QCheckBox(f"{marker}[{f.type}] {f.value}")
         cb.setChecked(f.approved)
         layout.addWidget(cb)
@@ -248,16 +261,20 @@ class ReviewWindow(QDialog):
 def run_review(
     filename: str, findings: list[Finding], full_text: str,
     _auto_approve_after_ms: int | None = None,
+    retry_notice: str | None = None,
+    highlight_spans: set[tuple[int, int]] | None = None,
 ) -> tuple[list[Finding], str] | None:
     """검토 화면을 띄우고, 승인되면 (승인/수동추가 반영된 findings, 문서유형)을,
     취소/닫힘이면 None을 반환.
 
     full_text: 수동 추가(6.3.1) 시 텍스트 검색 대상이 되는 문서 전체 텍스트.
+    retry_notice / highlight_spans: 자체 재검증 실패 후 검토 화면으로 복귀할 때
+    (6.5.1) 사용 -- 실제 값은 보여주지 않고 문구 + 항목 표시로만 안내 (6.5.3).
     _auto_approve_after_ms: 실사용에서는 쓰지 않음. 화면이 없는 환경(headless)에서
     통합 테스트할 때만 사용 — 지정한 시간 뒤 자동으로 승인 버튼을 누른 것처럼 동작.
     """
     app = QApplication.instance() or QApplication([])
-    window = ReviewWindow(filename, findings, full_text)
+    window = ReviewWindow(filename, findings, full_text, retry_notice, highlight_spans)
     if _auto_approve_after_ms is not None:
         from PySide6.QtCore import QTimer
         QTimer.singleShot(_auto_approve_after_ms, window._on_approve)

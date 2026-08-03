@@ -42,11 +42,15 @@ RRN_RE = re.compile(r"\d{6}-\d{7}")
 PASSPORT_RE = re.compile(r"\b[A-Z]\d{8}\b")
 # 계좌번호는 은행마다 자릿수가 달라 패턴만으론 오탐이 많음 -> "계좌" 문맥 근처에서만 인정
 ACCOUNT_RE = re.compile(r"\d{2,6}-\d{1,6}-\d{2,8}")
+# 카드번호(설계서 2번 범위 항목 -- 계좌번호만 있고 빠져있던 부분 추가): 4자리씩
+# 4묶음이 국내외 카드 공통 형식이라 이 패턴만 쓰고, 계좌번호와 마찬가지로
+# "카드" 문맥 근처에서만 인정해 순수 숫자열 오탐을 줄임
+CARD_RE = re.compile(r"\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b")
 
 
 @dataclass
 class Finding:
-    type: str            # 이름 | 전화번호 | 이메일 | 계좌번호 | 주민등록번호 | 여권번호 | 주소
+    type: str            # 이름 | 전화번호 | 이메일 | 계좌번호 | 카드번호 | 주민등록번호 | 여권번호 | 주소
     value: str
     start: int
     end: int
@@ -96,6 +100,17 @@ def detect_account(text: str) -> list[Finding]:
         window = text[window_start:m.start()]
         if "계좌" in window or "입금" in window or "예금주" in window:
             out.append(Finding("계좌번호", m.group(), m.start(), m.end()))
+    return out
+
+
+def detect_card(text: str) -> list[Finding]:
+    out = []
+    for m in CARD_RE.finditer(text):
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        window_start = max(line_start, m.start() - 15)
+        window = text[window_start:m.start()]
+        if "카드" in window:
+            out.append(Finding("카드번호", m.group(), m.start(), m.end()))
     return out
 
 
@@ -160,6 +175,7 @@ def detect_all(text: str) -> list[Finding]:
     findings += detect_rrn(text)
     findings += detect_passport(text)
     findings += detect_account(text)
+    findings += detect_card(text)
     findings += detect_names(text)
     findings += detect_addresses(text)
 

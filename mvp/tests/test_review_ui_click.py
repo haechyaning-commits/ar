@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -19,8 +20,14 @@ from PySide6.QtCore import Qt, QPoint, QTimer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QPushButton
 
+import dictionary_learning
 from detector import detect_all
 from review_ui import ReviewWindow
+
+# 6.2.1 사전 자동학습이 체크해제/수동추가 클릭마다 후보를 기록하므로, 실제
+# mvp/data/의 진짜 사전(surnames.txt/exclude_words.txt)이 반복 테스트 실행으로
+# 오염되지 않도록 이 테스트 세션 동안은 임시 폴더로 격리한다.
+dictionary_learning.DEFAULT_DATA_DIR = Path(tempfile.mkdtemp(prefix="dict_learning_test_"))
 
 SAMPLE = (
     "지출결의서\n"

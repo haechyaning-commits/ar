@@ -5,8 +5,12 @@ MVP 통합 진입점.
 환경 필요해 이 세션에서 검증 불가). 그 외 아키텍처(5번 섹션)의 핵심 흐름은 전부 구현:
 
 탐지 -> 재실행 방지 확인(6.4) -> 검토(전체승인+예외해제+문서유형 선택, 6.3)
--> 실제 마스킹+자체검증(6.5) -> 재실행 방지 마커/원본 보관(6.6)/감사로그(6.7)/
-요약리포트(6.8)까지를 하나의 원자적 트랜잭션으로 처리 (6.5.2), 실패 시 원본 무변경.
+-> 실제 마스킹+자체검증(6.5, 실패 시 검토 화면으로 복귀해 재시도 -- 8번 리스크
+"실패 후 후속 흐름") -> 재실행 방지 마커/원본 보관(6.6)/감사로그(6.7)/요약리포트(6.8)
+까지를 하나의 원자적 트랜잭션으로 처리 (6.5.2), 실패 시 원본 무변경.
+
+여러 파일은 process_batch()로 대기열 순차 처리(7번 정책표) -- 배치 자동처리가
+아니라 파일마다 검토 화면을 거침.
 
 실제 감사파일이 아닌 더미 데이터로만 테스트할 것 (2.1 선행 조건).
 """
@@ -30,8 +34,9 @@ def process_file(input_path: str, workspace_dir: str | None = None,
                   _auto_processor_name: str | None = None,
                   _auto_reprocess_confirm: bool | None = None) -> int:
     """반환값: 0=성공, 1=탐지 없음(그대로 종료), 2=검토 취소,
-    3=자체검증 실패(원본 무변경), 4=재실행 확인에서 취소,
-    5=원본이동/마커/로그/리포트 커밋 실패(원본 무변경, 롤백됨), 6=출력 폴더 준비 실패
+    3=자체검증 실패(헤드리스 모드에서만 -- 대화형에서는 검토 화면으로 복귀함),
+    4=재실행 확인에서 취소, 5=원본이동/마커/로그/리포트 커밋 실패(원본 무변경, 롤백됨),
+    6=출력 폴더 준비 실패
 
     workspace_dir: 생략하면 output.app_base_dir()(exe/스크립트 자신의 위치) 사용 --
     입력 파일이 어디 있든 결과가 항상 프로그램 옆 한 곳에 모이게 하기 위함(6.6).
@@ -75,13 +80,6 @@ def process_file(input_path: str, workspace_dir: str | None = None,
         print(f"[{src.name}] 탐지된 개인정보가 없습니다.")
         return 1
 
-    print(f"[{src.name}] {len(findings)}건 탐지됨 -> 검토 화면 표시")
-    reviewed = run_review(src.name, findings, full_text, spans, total_pages, str(src),
-                           _auto_approve_after_ms=_auto_approve_after_ms)
-    if reviewed is None:
-        print(f"[{src.name}] 검토가 취소되었습니다. 처리하지 않음.")
-        return 2
-
     processor = output.get_saved_processor_name(folders.logs)
     if processor is None:
         if _auto_processor_name is not None:
@@ -95,13 +93,39 @@ def process_file(input_path: str, workspace_dir: str | None = None,
             processor = name.strip() if ok and name.strip() else output.default_processor_name()
         output.save_processor_name(folders.logs, processor)
 
-    result = process_atomic(str(src), reviewed.findings, str(workspace),
-                             processor=processor, doc_type=reviewed.doc_type)
+    print(f"[{src.name}] {len(findings)}건 탐지됨 -> 검토 화면 표시")
+    retry_notice: str | None = None
+    highlight_spans: set[tuple[int, int]] = set()
+
+    while True:
+        reviewed = run_review(src.name, findings, full_text, spans, total_pages, str(src),
+                               _auto_approve_after_ms=_auto_approve_after_ms,
+                               retry_notice=retry_notice, highlight_spans=highlight_spans)
+        if reviewed is None:
+            print(f"[{src.name}] 검토가 취소되었습니다. 처리하지 않음.")
+            return 2
+        findings = reviewed.findings
+
+        result = process_atomic(str(src), findings, str(workspace),
+                                 processor=processor, doc_type=reviewed.doc_type)
+        if result.success or result.error != "self_check_failed":
+            break
+
+        # 6.5.1: 재검증 실패 -> 저장 차단. 실제 값은 화면/콘솔 어디에도 노출하지 않고
+        # (6.5.3) 건수만 안내한 뒤, 검토 화면으로 복귀해 해당 항목을 하이라이트
+        print(f"[{src.name}] 자체 재검증 실패 — 저장하지 않음. {len(result.leftover)}건이 완전히 지워지지 않았습니다.")
+        if _auto_approve_after_ms is not None:
+            # 헤드리스(자동승인) 모드는 사람이 없어 재시도 루프를 돌 수 없음 -> 즉시 실패 반환
+            return 3
+        leftover_values = set(result.leftover)
+        highlight_spans = {(f.start, f.end) for f in findings if f.value in leftover_values}
+        retry_notice = (
+            f"이전 시도에서 {len(result.leftover)}건이 완전히 지워지지 않았습니다. "
+            "아래 ⚠[미제거] 표시된 항목을 확인 후 다시 승인해 재시도하거나, "
+            "구조적 문제로 계속 실패하면 해당 항목 유형/페이지를 개발자에게 보고하세요."
+        )
 
     if not result.success:
-        if result.error == "self_check_failed":
-            print(f"[{src.name}] 자체 재검증 실패 — 저장하지 않음. 남은 항목 수: {len(result.leftover)}")
-            return 3
         print(f"[{src.name}] 원본 이동/마커/로그/리포트 기록 실패 — 원본은 원래 위치로 되돌렸습니다. ({result.error})")
         return 5
 
@@ -116,11 +140,42 @@ def process_file(input_path: str, workspace_dir: str | None = None,
     return 0
 
 
+def process_batch(
+    input_paths: list[str], workspace_dir: str | None = None,
+    _auto_approve_after_ms: int | None = None,
+) -> dict[str, int]:
+    """여러 파일을 대기열로 순차 처리 (7번 정책표).
+
+    배치 자동 처리가 아니라 파일마다 사람이 검토 화면에서 확인하는 구조 --
+    이 함수는 process_file()을 파일 개수만큼 반복 호출할 뿐, 검토를 건너뛰지
+    않음. 한 파일이 실패/취소돼도 나머지 파일 처리는 계속 진행.
+
+    반환값: {입력 경로: process_file() 반환코드} 딕셔너리.
+    """
+    results: dict[str, int] = {}
+    total = len(input_paths)
+    for i, input_path in enumerate(input_paths, start=1):
+        print(f"\n=== [{i}/{total}] {Path(input_path).name} 처리 시작 ===")
+        results[input_path] = process_file(
+            input_path, workspace_dir, _auto_approve_after_ms=_auto_approve_after_ms,
+        )
+
+    succeeded = sum(1 for rc in results.values() if rc == 0)
+    print(f"\n=== 배치 처리 완료: {succeeded}/{total}건 마스킹 완료 ===")
+    for path, rc in results.items():
+        if rc != 0:
+            reason = {
+                1: "탐지된 개인정보 없음", 2: "검토 취소", 3: "자체검증 실패",
+                4: "재실행 확인 후 취소됨", 5: "롤백됨", 6: "출력 폴더 준비 실패",
+            }.get(rc, f"코드 {rc}")
+            print(f"  - {Path(path).name}: {reason}")
+    return results
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("사용법: python3 main.py <입력.pdf> [작업폴더]")
-        print("  작업폴더 생략 시 프로그램(.exe/스크립트) 옆에 원본_보관/ 마스킹완료/ 요약리포트/ 로그/ 를 생성합니다.")
+        print("사용법: python3 main.py <입력1.pdf> [입력2.pdf ...]")
+        print("  결과는 프로그램(.exe/스크립트) 옆에 원본_보관/ 마스킹완료/ 요약리포트/ 로그/ 로 모입니다.")
         sys.exit(1)
-    in_path = sys.argv[1]
-    ws_dir = sys.argv[2] if len(sys.argv) > 2 else None
-    sys.exit(process_file(in_path, ws_dir))
+    batch_results = process_batch(sys.argv[1:])
+    sys.exit(0 if all(rc == 0 for rc in batch_results.values()) else 1)

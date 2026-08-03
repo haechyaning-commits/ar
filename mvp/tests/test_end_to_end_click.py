@@ -19,7 +19,11 @@ from PySide6.QtCore import Qt, QPoint, QTimer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton
 
+import dictionary_learning
 import main as main_module
+
+# 6.2.1 사전 자동학습이 실제 mvp/data/ 사전을 반복 테스트로 오염시키지 않도록 격리
+dictionary_learning.DEFAULT_DATA_DIR = Path(tempfile.mkdtemp(prefix="dict_learning_test_"))
 
 _FAILURES: list[str] = []
 

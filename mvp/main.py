@@ -4,7 +4,8 @@ MVP 통합 진입점.
 범위(설계서 기준 MVP): PDF 입력만 지원(hwp/hwpx 변환 어댑터는 제외),
 탐지 -> 최소 검토(전체승인+예외해제, 문서유형 선택, 수동추가) -> 실제 마스킹+자체검증
 (실패 시 검토 화면 복귀, 6.5.1) -> 파일명 규칙에 맞춰 저장(6.6) -> 원본 보관 이동(6.6)
--> 로그/요약리포트 기록(6.7, 6.8).
+-> 로그/요약리포트 기록(6.7, 6.8). 여러 파일은 process_batch()로 대기열 순차 처리(7번
+정책표) -- 배치 자동처리가 아니라 파일마다 검토 화면을 거침.
 
 재실행(중복 마스킹) 방지(6.4)는 MVP 범위 밖으로 남겨둠 (설계서 "제외 (나중에)" 항목).
 
@@ -115,10 +116,36 @@ def process_file(input_path: str, output_path: str | None = None,
     return 0
 
 
+def process_batch(
+    input_paths: list[str], _auto_approve_after_ms: int | None = None,
+) -> dict[str, int]:
+    """여러 파일을 대기열로 순차 처리 (7번 정책표).
+
+    배치 자동 처리가 아니라 파일마다 사람이 검토 화면에서 확인하는 구조 --
+    이 함수는 process_file()을 파일 개수만큼 반복 호출할 뿐, 검토를 건너뛰지
+    않음. 한 파일이 실패/취소돼도 나머지 파일 처리는 계속 진행 (hwp 변환의
+    "실패한 파일만 대기열에서 빼고 배치는 안 멈춤" 원칙과 같은 방향).
+
+    반환값: {입력 경로: process_file() 반환코드} 딕셔너리.
+    """
+    results: dict[str, int] = {}
+    total = len(input_paths)
+    for i, input_path in enumerate(input_paths, start=1):
+        print(f"\n=== [{i}/{total}] {Path(input_path).name} 처리 시작 ===")
+        results[input_path] = process_file(input_path, _auto_approve_after_ms=_auto_approve_after_ms)
+
+    succeeded = sum(1 for rc in results.values() if rc == 0)
+    print(f"\n=== 배치 처리 완료: {succeeded}/{total}건 마스킹 완료 ===")
+    for path, rc in results.items():
+        if rc != 0:
+            reason = {1: "탐지된 개인정보 없음", 2: "검토 취소", 3: "자체검증 실패", 4: "롤백됨"}.get(rc, f"코드 {rc}")
+            print(f"  - {Path(path).name}: {reason}")
+    return results
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("사용법: python3 main.py <입력.pdf> [출력.pdf]")
+        print("사용법: python3 main.py <입력1.pdf> [입력2.pdf ...]")
         sys.exit(1)
-    in_path = sys.argv[1]
-    out_path = sys.argv[2] if len(sys.argv) > 2 else None
-    sys.exit(process_file(in_path, out_path))
+    batch_results = process_batch(sys.argv[1:])
+    sys.exit(1 if any(rc == 4 for rc in batch_results.values()) else 0)

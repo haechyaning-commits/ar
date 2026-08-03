@@ -51,7 +51,9 @@ def process_file(input_path: str, output_path: str | None = None,
         print(f"[{src.name}] 자체 재검증 실패 — 저장하지 않음. 남은 항목: {result.leftover}")
         return 3
 
-    log_path, report_path = record_processing(input_path, result.output_path, result.masked_counts)
+    log_path, report_path = record_processing(
+        input_path, result.output_path, result.masked_counts, base_dir=src.parent,
+    )
     print(f"[{src.name}] 마스킹 완료 -> {result.output_path}")
     print(f"  유형별 건수: {result.masked_counts}")
     print(f"  로그: {log_path} / 요약리포트: {report_path}")

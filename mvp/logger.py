@@ -39,7 +39,7 @@ def get_processor() -> str:
 
 def _format_counts(counts: dict[str, int]) -> str:
     # MVP는 자동탐지만 있어 전부 "(자동)"으로 표기 (6.3.1 수동 추가 도입 시 확장)
-    return ", ".join(f"{type_}{n}건(자동)" for type_, n in counts.items())
+    return ", ".join(f"{type_} {n}건(자동)" for type_, n in counts.items())
 
 
 @dataclass

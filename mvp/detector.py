@@ -138,8 +138,10 @@ def detect_names(text: str) -> list[Finding]:
             out.append(Finding("이름", word, start, end, group="업무상성명후보", confidence="낮음"))
             seen.add((start, end))
 
-    # "직위+이름" 패턴 (예: "감사팀장 홍길동")
-    title_pattern = re.compile("(" + "|".join(BUSINESS_TITLES) + r")\s+([가-힣]{2,4})")
+    # "직위+이름" 패턴 (예: "감사팀장 홍길동"). 공백/탭만 허용 -- \s+였을 때
+    # 줄바꿈까지 걸쳐 매칭되어 다음 줄의 무관한 단어(예: "...최과장\n연락처")를
+    # 이름으로 잘못 잡는 버그가 있었음 (같은 줄 안에서만 성립하는 패턴이므로 수정)
+    title_pattern = re.compile("(" + "|".join(BUSINESS_TITLES) + r")[^\S\n]+([가-힣]{2,4})")
     for m in title_pattern.finditer(text):
         start, end, word = m.start(2), m.end(2), m.group(2)
         if _is_surname_word(word) and (start, end) not in seen:
@@ -149,16 +151,27 @@ def detect_names(text: str) -> list[Finding]:
     return out
 
 
+ADDRESS_LABELS = ["주소", "거주지"]
+_ADDRESS_LABEL_RE = re.compile("(" + "|".join(ADDRESS_LABELS) + r")\s*[:：]\s*")
+
+
 def detect_addresses(text: str) -> list[Finding]:
+    # 설계서 6.2: "행정구역 사전 매칭 + 라벨 문맥 규칙"을 함께 써야 함.
+    # 이전엔 라벨 없이 문서 전체에서 지역명만으로 매칭해서, 지역명이 들어간
+    # 아무 문장(예: "워크숍은 서울특별시에서 개최되었습니다")의 나머지 줄까지
+    # 전부 "주소"로 오탐하는 버그가 있었음 -> "주소:"/"거주지:" 라벨 뒤로 한정
     out = []
     region_pattern = re.compile("|".join(re.escape(r) for r in sorted(REGIONS, key=len, reverse=True)))
-    for m in region_pattern.finditer(text):
-        line_end = text.find("\n", m.end())
+    for lm in _ADDRESS_LABEL_RE.finditer(text):
+        line_end = text.find("\n", lm.end())
         if line_end == -1:
             line_end = len(text)
-        addr = text[m.start():line_end].strip()
-        if len(addr) > len(m.group()):  # 지역명 단독은 주소로 안 봄
-            out.append(Finding("주소", addr, m.start(), m.start() + len(addr), confidence="낮음"))
+        raw = text[lm.end():line_end]
+        value = raw.strip()
+        if not value or not region_pattern.match(value):
+            continue
+        start = lm.end() + raw.find(value)
+        out.append(Finding("주소", value, start, start + len(value), confidence="낮음"))
     return out
 
 

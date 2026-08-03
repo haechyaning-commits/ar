@@ -3,3 +3,5 @@ __pycache__/
 *.tmp
 mvp/_dummy_audit_file.pdf
 mvp/_dummy_audit_file_masked.pdf
+mvp/로그/
+mvp/요약리포트/

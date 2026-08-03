@@ -14,30 +14,51 @@
   제공. 이미 탐지된 위치는 체크만 맞추고, 자동탐지가 놓친 위치는 "전체 선택"을
   눌렀을 때만 새 항목으로 추가(6.3.1 수동 추가와 동일한 파이프라인 재사용 —
   "해제"는 원래 대상이 아니던 위치를 새로 만들 이유가 없어 아무 일도 안 함)
+- 페이지 단위 진행 상태 표시 (6.3.4): 이 UI에는 실제 PDF 페이지 렌더링/이동이
+  없어(전체 문서를 한 화면의 스크롤 목록으로 보여줌) 설계서 원안의 "페이지 넘김
+  이벤트"가 그대로 존재하지 않음. 대신 "스크롤해서 그 페이지의 항목이 화면에
+  실제로 보였다"를 페이지 넘김의 등가물로 삼아 자동으로 검토완료 표시함(검토자가
+  버튼을 눌러야 하는 별도 동작 아님 -- 목록을 훑어보는 것 자체가 진행 상황을
+  채움). 승인 시점에 아직 화면에 스크롤되어 보인 적 없는 페이지가 있으면 경고를
+  띄우고 승인을 차단. 진행바의 페이지 버튼은 클릭하면 해당 페이지의 첫 항목으로
+  점프하는 용도로만 쓰고(눌러야 검토완료 처리되는 게 아님), 배지로 페이지별
+  탐지 건수를 보여줌. "안 본 페이지만 보기" 필터·경고 페이지 색 강조는 아직
+  미구현(향후 확장).
 - "승인" 버튼을 눌러야 다음 단계(마스킹)로 넘어감
 
 MVP 범위: 사이드바 항목 점프, 단축키, 실행취소(Undo) 등은 향후 확장으로 남겨두고
-"전체승인 + 예외 해제" + "저신뢰 우선 정렬" + "동일 값 일괄 처리"까지만 구현.
+"전체승인 + 예외 해제" + "저신뢰 우선 정렬" + "동일 값 일괄 처리" + "페이지 단위
+진행 상태 표시"까지만 구현.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QHBoxLayout, QLabel, QMenu,
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from detector import CONFIDENCE_LEVELS, Finding, find_occurrences
+from pdf_extract import SpanRef, page_of
 
 
 class ReviewWindow(QDialog):
-    def __init__(self, filename: str, findings: list[Finding], full_text: str = ""):
+    def __init__(
+        self, filename: str, findings: list[Finding], full_text: str = "",
+        spans: list[SpanRef] | None = None, total_pages: int = 1,
+    ):
         super().__init__()
         self.setWindowTitle(f"검토 - {filename}")
-        self.resize(560, 480)
+        self.resize(560, 520)
         self.findings = findings
         self.full_text = full_text
+        self.spans = spans or []
+        self.total_pages = max(total_pages, 1)
         self.checkboxes: list[tuple[QCheckBox, Finding]] = []
+        self.finding_page: dict[int, int] = {}  # id(finding) -> page_index
+        self.page_buttons: dict[int, QPushButton] = {}
+        self.page_counts: dict[int, int] = {}
+        self.page_reviewed: dict[int, bool] = {}  # 스크롤로 실제 화면에 보인 적 있는 페이지
         self.approved_result: bool | None = None  # None=닫힘/취소, True=승인
 
         layout = QVBoxLayout(self)
@@ -46,8 +67,18 @@ class ReviewWindow(QDialog):
             "기본적으로 전부 마스킹 대상입니다. 마스킹하면 안 되는 항목만 체크 해제하세요."
         ))
 
+        for f in findings:
+            self.finding_page[id(f)] = page_of(self.spans, f.start)
+            self.page_counts[self.finding_page[id(f)]] = self.page_counts.get(self.finding_page[id(f)], 0) + 1
+
+        layout.addLayout(self._build_progress_bar())
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: #b00;")
+        layout.addWidget(self.status_label)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        self.scroll = scroll
         inner = QWidget()
         self.inner_layout = QVBoxLayout(inner)
 
@@ -66,6 +97,13 @@ class ReviewWindow(QDialog):
         scroll.setWidget(inner)
         layout.addWidget(scroll)
 
+        # 6.3.4: 스크롤될 때마다 화면에 보인 항목들의 페이지를 자동으로 검토완료 처리.
+        # (여기서 바로 _check_visible_rows()를 부르면 안 됨 -- 창이 실제로 표시되기
+        # 전이라 레이아웃이 아직 최종 크기로 확정되지 않았고, 그 상태로 검사하면
+        # 뷰포트가 실제보다 훨씬 크게 잡혀서 전부 "보임"으로 잘못 표시됨. 창이 실제로
+        # 뜨는 시점(showEvent)에 처음 검사하고, 이후엔 스크롤될 때마다 재검사)
+        scroll.verticalScrollBar().valueChanged.connect(lambda _v: self._check_visible_rows())
+
         btn_row = QHBoxLayout()
         select_all = QPushButton("전체 선택")
         select_all.clicked.connect(lambda: self._set_all(True))
@@ -78,6 +116,82 @@ class ReviewWindow(QDialog):
         btn_row.addStretch()
         btn_row.addWidget(approve)
         layout.addLayout(btn_row)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # 창이 실제로 화면에 뜨는(=레이아웃이 최종 크기로 확정된) 시점에 첫 검사
+        self._check_visible_rows()
+
+    # -- 6.3.4 페이지 단위 진행 상태 표시 ------------------------------------
+    def _build_progress_bar(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        self.progress_label = QLabel()
+        row.addWidget(self.progress_label)
+        row.addSpacing(8)
+        for page_index in range(self.total_pages):
+            self.page_reviewed[page_index] = False
+            btn = QPushButton(self._page_button_text(page_index))
+            btn.setFixedWidth(44)
+            btn.setToolTip(f"페이지 {page_index + 1}로 이동 (스크롤해서 보면 자동으로 검토완료 표시됨)")
+            btn.clicked.connect(lambda _checked=False, p=page_index: self._jump_to_page(p))
+            self.page_buttons[page_index] = btn
+            row.addWidget(btn)
+        row.addStretch()
+        self._refresh_page_buttons()
+        return row
+
+    def _page_button_text(self, page_index: int) -> str:
+        count = self.page_counts.get(page_index, 0)
+        return f"{page_index + 1}\n({count}건)" if count else f"{page_index + 1}"
+
+    def _refresh_page_buttons(self):
+        for page_index, btn in self.page_buttons.items():
+            btn.setText(self._page_button_text(page_index))
+            btn.setStyleSheet("background-color: #b7e3b7;" if self.page_reviewed.get(page_index) else "")
+        self._update_progress_label()
+
+    def _update_progress_label(self):
+        done = sum(1 for v in self.page_reviewed.values() if v)
+        total = len(self.page_reviewed)
+        bar = "■" * done + "□" * (total - done)
+        self.progress_label.setText(f"[{bar}]  {done} / {total} 페이지 검토 완료")
+
+    def _jump_to_page(self, page_index: int):
+        # "진행바 클릭 시 해당 페이지로 즉시 이동" -- 그 페이지의 첫 항목으로 스크롤.
+        # 검토완료 표시 자체는 스크롤 결과로 _check_visible_rows가 자동으로 처리함
+        # (이 버튼을 누르는 행위 자체가 검토완료를 만드는 게 아님)
+        for cb, f in self.checkboxes:
+            if self.finding_page.get(id(f)) == page_index:
+                self.scroll.ensureWidgetVisible(cb)
+                break
+
+    def _check_visible_rows(self):
+        """스크롤 영역에 실제로 보이는(교차하는) 항목들의 페이지를 검토완료로 표시.
+        한 번 검토완료된 페이지는 다시 스크롤해서 안 보이게 되어도 그대로 유지."""
+        viewport = self.scroll.viewport()
+        viewport_rect = viewport.rect()
+        changed = False
+        for cb, f in self.checkboxes:
+            page = self.finding_page.get(id(f))
+            if page is None or self.page_reviewed.get(page):
+                continue
+            top_left = cb.mapTo(viewport, QPoint(0, 0))
+            widget_rect = QRect(top_left, cb.size())
+            if viewport_rect.intersects(widget_rect):
+                self.page_reviewed[page] = True
+                changed = True
+        if changed:
+            self.status_label.setText("")
+            self._refresh_page_buttons()
+
+    def _mark_all_pages_reviewed(self):
+        """실사용에서는 스크롤로 자동 처리됨 -- 헤드리스 테스트 전용 보조 메서드
+        (테스트 환경엔 실제로 스크롤할 화면이 없어 가시성 감지가 의미 없으므로)."""
+        for page_index in self.page_reviewed:
+            self.page_reviewed[page_index] = True
+        self._refresh_page_buttons()
+
+    # -------------------------------------------------------------------
 
     def _make_checkbox(self, f: Finding) -> QCheckBox:
         tags = [f"확신도: {f.confidence}"]
@@ -104,6 +218,14 @@ class ReviewWindow(QDialog):
         cb = self._make_checkbox(f)
         self.inner_layout.insertWidget(self.inner_layout.count() - 1, cb)
         self.checkboxes.append((cb, f))
+
+        # 새 항목도 페이지 진행바 배지에 반영 (동일 값 일괄 처리로 새로 찾은 위치일 수 있음)
+        page_index = page_of(self.spans, f.start)
+        self.finding_page[id(f)] = page_index
+        self.page_counts[page_index] = self.page_counts.get(page_index, 0) + 1
+        if page_index in self.page_buttons:
+            self._refresh_page_buttons()
+        self._check_visible_rows()  # 지금 화면에 바로 보이는 위치에 추가됐을 수 있음
 
     def _set_all(self, checked: bool):
         for cb, _ in self.checkboxes:
@@ -146,6 +268,16 @@ class ReviewWindow(QDialog):
                 self._add_row_before_stretch(new_f)
 
     def _on_approve(self):
+        self._check_visible_rows()  # 마지막으로 화면에 있는 상태를 승인 직전 한 번 더 반영
+        unreviewed = [p + 1 for p, seen in sorted(self.page_reviewed.items()) if not seen]
+        if unreviewed:
+            # 6.3.4: 스크롤로 실제로 보인 적 없는 페이지가 남아있으면 승인 자체를 차단
+            pages_str = ", ".join(str(p) for p in unreviewed)
+            self.status_label.setText(
+                f"⚠ {len(unreviewed)}페이지를 아직 확인하지 않았습니다 (페이지 {pages_str}). "
+                "목록을 스크롤해서 해당 페이지 항목을 확인한 뒤 다시 승인하세요."
+            )
+            return
         for cb, f in self.checkboxes:
             f.approved = cb.isChecked()
         self.approved_result = True
@@ -154,20 +286,29 @@ class ReviewWindow(QDialog):
 
 def run_review(
     filename: str, findings: list[Finding], full_text: str = "",
+    spans: list[SpanRef] | None = None, total_pages: int = 1,
     _auto_approve_after_ms: int | None = None,
 ) -> list[Finding] | None:
     """검토 화면을 띄우고, 승인되면 approved 플래그가 반영된 findings를,
     취소/닫힘이면 None을 반환.
 
-    full_text: 6.3.3(동일 값 일괄 처리)이 문서 전체에서 같은 값을 찾을 때 씀.
+    full_text/spans: 6.3.3(동일 값 일괄 처리)과 6.3.4(페이지 단위 진행 상태
+    표시)가 각각 문서 전체 검색과 페이지 판별에 씀.
+    total_pages: 6.3.4 진행바에 표시할 전체 페이지 수.
     _auto_approve_after_ms: 실사용에서는 쓰지 않음. 화면이 없는 환경(headless)에서
-    통합 테스트할 때만 사용 — 지정한 시간 뒤 자동으로 승인 버튼을 누른 것처럼 동작.
+    통합 테스트할 때만 사용 — 지정한 시간 뒤 모든 페이지를 확인 표시하고
+    승인 버튼을 누른 것처럼 동작(6.3.4 도입 후에도 자동 테스트가 막히지 않도록).
     """
     app = QApplication.instance() or QApplication([])
-    window = ReviewWindow(filename, findings, full_text)
+    window = ReviewWindow(filename, findings, full_text, spans, total_pages)
     if _auto_approve_after_ms is not None:
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(_auto_approve_after_ms, window._on_approve)
+
+        def _auto():
+            window._mark_all_pages_reviewed()
+            window._on_approve()
+
+        QTimer.singleShot(_auto_approve_after_ms, _auto)
     window.exec()
     if window.approved_result:
         return window.findings

@@ -71,3 +71,12 @@ def extract_text_and_spans(doc: fitz.Document) -> tuple[str, list[SpanRef]]:
 def spans_covering(spans: list[SpanRef], start: int, end: int) -> list[SpanRef]:
     """[start, end) 구간과 겹치는 스팬들을 문서 내 등장 순서대로 반환."""
     return [s for s in spans if s.start < end and s.end > start]
+
+
+def page_of(spans: list[SpanRef], pos: int) -> int:
+    """pos(전역 offset)가 속한 페이지 번호(0-based). 6.3.4 페이지 단위 진행
+    상태 표시에서, 탐지 항목이 어느 페이지 것인지 알아내는 데 씀."""
+    for s in spans:
+        if s.start <= pos < s.end:
+            return s.page_index
+    return 0

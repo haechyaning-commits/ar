@@ -32,7 +32,8 @@ def process_file(input_path: str, output_path: str | None = None,
     doc = fitz.open(input_path)
     # masker.py도 같은 방식(pdf_extract)으로 다시 추출해 findings의 start/end를
     # 실제 좌표로 되찾으므로, 탐지 쪽도 반드시 이 함수를 써야 오프셋이 어긋나지 않음
-    full_text, _ = extract_text_and_spans(doc)
+    full_text, spans = extract_text_and_spans(doc)
+    total_pages = doc.page_count
     doc.close()
 
     findings = detect_all(full_text)
@@ -41,7 +42,7 @@ def process_file(input_path: str, output_path: str | None = None,
         return 1
 
     print(f"[{src.name}] {len(findings)}건 탐지됨 -> 검토 화면 표시")
-    reviewed = run_review(src.name, findings, full_text, _auto_approve_after_ms)
+    reviewed = run_review(src.name, findings, full_text, spans, total_pages, _auto_approve_after_ms)
     if reviewed is None:
         print(f"[{src.name}] 검토가 취소되었습니다. 처리하지 않음.")
         return 2

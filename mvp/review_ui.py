@@ -7,6 +7,9 @@
   렌더링된 PDF 페이지 위에서 실제 마우스 조작이 필요해 디스플레이 없는 이
   개발 환경에서는 만들어도 검증이 안 되므로 보류
 - "승인" 버튼을 눌러야 다음 단계(마스킹)로 넘어감
+- 사전 자동 학습(6.2.1): 이름 체크 해제/수동 이름 추가를 조용히 dictionary_learning에
+  기록만 해두고, 반영됐을 때만(반환값 True) 통보. 화면 상단엔 최근 반영 내역 +
+  되돌리기 버튼만 노출(질문 팝업 없음)
 
 MVP 범위: 사이드바 항목 점프, 단축키, 실행취소(Undo), 드래그/클릭 수동 추가는
 향후 확장으로 남겨두고 "전체승인 + 예외 해제 + 텍스트 기반 수동 추가"까지 구현.
@@ -20,7 +23,8 @@ from PySide6.QtWidgets import (
     QScrollArea, QVBoxLayout, QWidget,
 )
 
-from detector import Finding
+import dictionary_learning
+from detector import Finding, reload_dictionaries
 
 
 def confirm_reprocess(filename: str, reasons: list[str], _auto_confirm: bool | None = None) -> bool:
@@ -101,6 +105,10 @@ class ReviewWindow(QDialog):
             notice_label.setStyleSheet("color: #b00020; font-weight: bold;")
             layout.addWidget(notice_label)
 
+        learning_section = self._build_learning_section()
+        if learning_section is not None:
+            layout.addLayout(learning_section)
+
         doc_type_row = QHBoxLayout()
         doc_type_row.addWidget(QLabel("문서유형 (결과 파일명에 사용됨):"))
         self.doc_type_combo = QComboBox()
@@ -158,6 +166,34 @@ class ReviewWindow(QDialog):
         btn_row.addStretch()
         btn_row.addWidget(approve)
         layout.addLayout(btn_row)
+
+    def _build_learning_section(self) -> QVBoxLayout | None:
+        """6.2.1: 검토자 행동이 쌓여 사전에 자동 반영된 최근 항목을 조용히
+        보여줌 (질문형 아님 -- 이미 반영된 걸 통보). 반영된 게 없으면 아무것도
+        안 보여줘서 평소엔 화면이 그대로 조용함."""
+        recent = dictionary_learning.get_recent_promotions()
+        if not recent:
+            return None
+
+        box = QVBoxLayout()
+        box.addWidget(QLabel(
+            "<b>최근 사전 자동 반영</b> (검토 중 반복된 행동을 학습했습니다 — 잘못됐으면 되돌리세요)"
+        ))
+        for promo in recent:
+            row = QHBoxLayout()
+            row.addWidget(QLabel(f"[{promo.direction}] {promo.word} ({promo.promoted_at[:10]})"))
+            undo_btn = QPushButton("되돌리기")
+            undo_btn.clicked.connect(lambda _checked=False, p=promo, b=undo_btn: self._on_revert_learning(p, b))
+            row.addWidget(undo_btn)
+            row.addStretch()
+            box.addLayout(row)
+        return box
+
+    def _on_revert_learning(self, promo: dictionary_learning.Promotion, btn: QPushButton):
+        dictionary_learning.revert_promotion(promo.word, promo.direction)
+        reload_dictionaries()
+        btn.setText("되돌림")
+        btn.setEnabled(False)
 
     def _build_manual_add_section(self) -> QVBoxLayout:
         box = QVBoxLayout()
@@ -258,10 +294,19 @@ class ReviewWindow(QDialog):
             self._add_row(self.manual_items_layout, f)
             added += 1
 
+        result_text = f"{added}건 추가됨." if added else "선택된 항목이 없습니다."
+        if added and mtype == "이름":
+            # 6.2.1: 수동으로 이름을 추가하는 행동을 "성씨 후보" 신호로 기록.
+            # SURNAMES는 성씨(대개 1글자)만 담는 사전이라 전체 이름이 아니라
+            # 첫 글자만 후보로 씀 -- 남궁/황보 같은 2글자 성씨는 이 근사치로는
+            # 못 배움 (검토자가 계속 예외 취급하게 되는 정도의 알려진 한계).
+            if dictionary_learning.record_candidate(needle[0], "이름후보"):
+                result_text += f" [사전 자동학습] '{needle[0]}' 성씨 후보로 반영했습니다."
+
         self.manual_result_list.clear()
         self._toggle_manual_controls(False)
         self.manual_text_input.clear()
-        self.manual_result_label.setText(f"{added}건 추가됨." if added else "선택된 항목이 없습니다.")
+        self.manual_result_label.setText(result_text)
 
     def _add_row(self, layout: QVBoxLayout, f: Finding):
         marker = "[수동]" if f.source == "수동" else ""
@@ -278,7 +323,12 @@ class ReviewWindow(QDialog):
 
     def _on_approve(self):
         for cb, f in self.checkboxes:
+            newly_unchecked = f.approved and not cb.isChecked()
             f.approved = cb.isChecked()
+            if newly_unchecked and f.type == "이름" and f.source == "자동":
+                # 6.2.1: 자동탐지된 이름을 체크 해제하는 행동을 "제외어 후보" 신호로 기록
+                if dictionary_learning.record_candidate(f.value, "제외"):
+                    print(f"[사전 자동학습] '{f.value}' 제외어로 반영했습니다.")
         # 빈 값으로 파일명이 만들어지지 않도록, 비어있으면 목록의 기본값으로 대체
         self.doc_type = self.doc_type_combo.currentText().strip() or DOC_TYPES[-1]
         self.approved_result = True
@@ -310,6 +360,9 @@ def run_review(
         from PySide6.QtCore import QTimer
         QTimer.singleShot(_auto_approve_after_ms, window._on_approve)
     window.exec()
+    # 6.2.1: 이 세션 중 사전에 반영/취소된 게 있으면, 같은 프로세스에서 이어지는
+    # 다음 파일(배치 처리) 탐지부터 바로 적용되도록 다시 읽어들임
+    reload_dictionaries()
     if window.approved_result:
         return window.findings, window.doc_type
     return None

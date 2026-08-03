@@ -25,6 +25,16 @@ EXCLUDE_WORDS = _load_lines("exclude_words.txt")
 REGIONS = _load_lines("regions.txt")
 SURNAMES_SORTED = sorted(SURNAMES, key=len, reverse=True)
 
+
+def reload_dictionaries() -> None:
+    """6.2.1 사전 자동학습이 사전 파일을 갱신한 뒤 호출 -- 배치 처리(같은
+    프로세스 안에서 여러 파일을 순차 처리)의 다음 파일부터 바로 반영되게 함."""
+    global SURNAMES, EXCLUDE_WORDS, REGIONS, SURNAMES_SORTED
+    SURNAMES = _load_lines("surnames.txt")
+    EXCLUDE_WORDS = _load_lines("exclude_words.txt")
+    REGIONS = _load_lines("regions.txt")
+    SURNAMES_SORTED = sorted(SURNAMES, key=len, reverse=True)
+
 BUSINESS_TITLES = [
     "팀장", "과장", "차장", "부장", "국장", "실장", "본부장", "이사",
     "계장", "반장", "주임", "대리", "사원", "감사관", "위원",

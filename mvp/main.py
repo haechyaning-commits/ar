@@ -18,6 +18,7 @@ import fitz  # PyMuPDF
 
 from detector import detect_all
 from masker import mask_pdf
+from pdf_extract import extract_text_and_spans
 from review_ui import run_review
 
 
@@ -29,7 +30,9 @@ def process_file(input_path: str, output_path: str | None = None,
         output_path = str(src.with_name(src.stem + "_masked.pdf"))
 
     doc = fitz.open(input_path)
-    full_text = "\n".join(page.get_text(sort=True) for page in doc)
+    # masker.py도 같은 방식(pdf_extract)으로 다시 추출해 findings의 start/end를
+    # 실제 좌표로 되찾으므로, 탐지 쪽도 반드시 이 함수를 써야 오프셋이 어긋나지 않음
+    full_text, _ = extract_text_and_spans(doc)
     doc.close()
 
     findings = detect_all(full_text)

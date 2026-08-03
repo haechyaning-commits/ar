@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 import fitz  # PyMuPDF
 
 from detector import Finding
+from pdf_extract import SpanRef, extract_text_and_spans, spans_covering
 
 
 # ---------------------------------------------------------------------------
@@ -76,68 +77,97 @@ def mask_value(f: Finding) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 리댁션 적용
+# 리댁션 적용 (위치 기반, v15)
 # ---------------------------------------------------------------------------
 # 주의(실측으로 확인한 함정): add_redact_annot(text=..., fontsize=N)에 폰트 크기를
 # 지정해도 PyMuPDF는 원본 글자의 좁은 사각형 안에 억지로 맞추면서 자동으로 글자를
-# 줄여버림 (예: 11pt를 줘도 실제로는 8~9pt로 축소되어 삽입됨). 그래서 리댁션은
+# 줄여버린다 (예: 11pt를 줘도 실제로는 8~9pt로 축소되어 삽입됨). 그래서 리댁션은
 # "지우기"만 담당하게 하고, 마스킹된 텍스트는 원본과 같은 폰트 크기·위치(baseline)를
-# 직접 계산해서 별도로 그려 넣는 방식으로 바꿈.
-def _plan_replacements(page: fitz.Page, value_to_masked: dict[str, str]):
-    """리댁션 전에, 각 span에서 대상 문자열의 정확한 baseline 위치와 폰트 크기를 계산."""
-    plans = []  # (rect, masked_text, baseline_point, fontsize)
-    for block in page.get_text("dict").get("blocks", []):
-        for line in block.get("lines", []):
-            for span in line.get("spans", []):
-                text = span["text"]
-                size = span.get("size", 11)
-                ox, oy = span["origin"]
-                for value, masked in value_to_masked.items():
-                    start = 0
-                    while (idx := text.find(value, start)) != -1:
-                        prefix_width = fitz.get_text_length(text[:idx], fontname="korea", fontsize=size)
-                        value_width = fitz.get_text_length(value, fontname="korea", fontsize=size)
-                        baseline = (ox + prefix_width, oy)
-                        rect = fitz.Rect(ox + prefix_width, span["bbox"][1], ox + prefix_width + value_width, span["bbox"][3])
-                        plans.append((rect, masked, baseline, size))
-                        start = idx + len(value)
+# 직접 계산해서 별도로 그려 넣는 방식으로 처리한다.
+#
+# (v15) 이전엔 승인된 항목의 "문자열 값"으로 페이지 전체를 재검색해서 마스킹했음
+# -> 같은 값이 문서 여러 곳에 있으면, 검토자가 특정 항목만 체크 해제해도 같은 값을
+# 가진 다른 위치가 남아있으면 전부 같이 마스킹되는 버그가 있었음(masked_counts
+# 집계도 실제 처리 건수와 안 맞았음). Finding.start/end를 pdf_extract의 스팬
+# 매핑으로 되짚어, 승인된 "그 위치"만 정확히 마스킹하도록 바꿈.
+def _plan_for_finding(f: Finding, full_text: str, spans: list[SpanRef]):
+    """f.start:f.end 위치가 실제로 f.value와 일치하는지 확인하고,
+    그 구간과 겹치는 스팬(들)에 대한 (page_index, rect, masked_segment, baseline, fontsize) 계획을 만든다.
+    구간이 여러 스팬에 걸쳐 있어도(폰트가 중간에 바뀌는 등) 스팬별로 나눠서 처리한다.
+    """
+    if full_text[f.start:f.end] != f.value:
+        # 탐지 시점 오프셋과 현재 문서가 어긋남(방어적 점검) -> 위치를 못 찾은 것으로
+        # 처리해 self_check가 저장을 막게 함 ("확실하지 않으면 저장하지 않는다")
+        return []
+
+    masked = mask_value(f)
+    plans = []
+    for span in spans_covering(spans, f.start, f.end):
+        local_lo = max(f.start, span.start) - span.start
+        local_hi = min(f.end, span.end) - span.start
+        seg_lo = max(f.start, span.start) - f.start
+        seg_hi = min(f.end, span.end) - f.start
+
+        prefix_width = fitz.get_text_length(span.text[:local_lo], fontname="korea", fontsize=span.fontsize)
+        seg_width = fitz.get_text_length(span.text[local_lo:local_hi], fontname="korea", fontsize=span.fontsize)
+        ox, oy = span.origin
+        rect = fitz.Rect(ox + prefix_width, span.bbox[1], ox + prefix_width + seg_width, span.bbox[3])
+        baseline = (ox + prefix_width, oy)
+        plans.append((span.page_index, rect, masked[seg_lo:seg_hi], baseline, span.fontsize))
     return plans
 
 
-def apply_masking(doc: fitz.Document, findings: list[Finding]) -> dict[str, str]:
+def apply_masking(doc: fitz.Document, findings: list[Finding]) -> tuple[list[Finding], list[Finding]]:
+    """승인된 항목만, 각자의 위치에서만 마스킹한다.
+    반환값: (mapped, unmapped) -- mapped는 위치를 찾아 리댁션을 실제로 시도한 항목
+    (self_check가 진짜로 지워졌는지 재확인), unmapped는 위치 자체를 못 찾아 아예
+    손대지 못한 항목(무조건 저장을 막아야 함 -- self_check로는 못 잡는 실패 유형이라
+    별도로 반환한다).
+    """
+    full_text, spans = extract_text_and_spans(doc)
     approved = [f for f in findings if f.approved]
-    value_to_masked: dict[str, str] = {}
+
+    plans_by_page: dict[int, list[tuple[fitz.Rect, str, tuple[float, float], float]]] = {}
+    mapped: list[Finding] = []
+    unmapped: list[Finding] = []
     for f in approved:
-        value_to_masked.setdefault(f.value, mask_value(f))
+        plans = _plan_for_finding(f, full_text, spans)
+        if not plans:
+            unmapped.append(f)
+            continue
+        mapped.append(f)
+        for page_index, rect, masked_segment, baseline, size in plans:
+            plans_by_page.setdefault(page_index, []).append((rect, masked_segment, baseline, size))
 
-    for page in doc:
-        plans = _plan_replacements(page, value_to_masked)
-        # 계획한 위치가 있으면 그대로, 없으면(다중 span에 걸친 값 등) search_for로 대체 탐색
-        planned_rects = {tuple(round(c, 1) for c in p[0]) for p in plans}
-        for value, masked in value_to_masked.items():
-            for rect in page.search_for(value):
-                key = tuple(round(c, 1) for c in rect)
-                if key not in planned_rects:
-                    plans.append((rect, masked, None, 11))
-
-        for rect, masked, baseline, size in plans:
+    for page_index, plans in plans_by_page.items():
+        page = doc[page_index]
+        for rect, _masked_segment, _baseline, _size in plans:
             page.add_redact_annot(rect, fill=(1, 1, 1))
         page.apply_redactions()
 
-        for rect, masked, baseline, size in plans:
-            point = baseline if baseline is not None else (rect.x0, rect.y1 - 2)
-            page.insert_text(point, masked, fontname="korea", fontsize=size)
+        for _rect, masked_segment, baseline, size in plans:
+            page.insert_text(baseline, masked_segment, fontname="korea", fontsize=size)
 
-    return value_to_masked
+    return mapped, unmapped
 
 
 # ---------------------------------------------------------------------------
 # 자체 재검증 (6.5.1-1)
 # ---------------------------------------------------------------------------
-def self_check(doc: fitz.Document, original_values) -> list[str]:
-    # sort=True 필수 (v11 PoC 실측: 없으면 재추출 순서가 흐트러질 수 있음)
-    full_text = "\n".join(page.get_text(sort=True) for page in doc)
-    return [v for v in original_values if v in full_text]
+def self_check(doc: fitz.Document, mapped: list[Finding]) -> list[str]:
+    """apply_masking이 위치를 찾아 리댁션을 시도한 항목(mapped)만 대상으로,
+    그 위치에서 원본 값이 실제로 사라졌는지 재확인한다 (리댁션 API가 특정
+    케이스에서 조용히 실패하는 경우를 잡아내기 위함, 6.5.1-1).
+
+    위치 자체를 못 찾은 항목(unmapped)은 여기서 검사할 대상이 아예 없으므로
+    -- 아무것도 안 바뀐 상태와 구분이 안 됨 -- 호출하는 쪽(mask_pdf)에서
+    unmapped를 무조건 실패로 취급해야 한다.
+    """
+    # pdf_extract는 마스킹 전후로 항상 같은 방식(dict/sort=True)으로 추출하고,
+    # 모든 마스킹 함수가 원본과 같은 길이의 문자열을 돌려주므로(mask_name/mask_phone/...),
+    # 마스킹 후에도 같은 start:end 위치를 그대로 다시 비교할 수 있다.
+    full_text, _ = extract_text_and_spans(doc)
+    return [f.value for f in mapped if full_text[f.start:f.end] == f.value]
 
 
 # ---------------------------------------------------------------------------
@@ -192,8 +222,11 @@ def mask_pdf(input_path: str, findings: list[Finding], output_path: str) -> Mask
     rotated_warning = has_rotated_text(doc)
     hidden_warning = has_hidden_content(doc)
 
-    value_to_masked = apply_masking(doc, findings)
-    leftover = self_check(doc, value_to_masked.keys())
+    mapped, unmapped = apply_masking(doc, findings)
+    # mapped: 리댁션을 시도한 항목 -> self_check로 실제로 지워졌는지 재확인
+    # unmapped: 위치 자체를 못 찾아 손도 못 댄 항목 -> self_check로는 구분이
+    # 안 되므로(그 자리에 다른 내용이 있으면 "지워짐"과 똑같이 보임) 무조건 실패 처리
+    leftover = self_check(doc, mapped) + [f.value for f in unmapped]
 
     if leftover:
         # 6.5.1: 재검증 실패 -> 저장 자체를 하지 않음, 원본/입력 파일 무변경

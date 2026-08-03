@@ -243,6 +243,24 @@ def apply_cross_validation(text: str, findings: list[Finding]) -> list[Finding]:
     return findings
 
 
+def find_occurrences(text: str, value: str) -> list[tuple[int, int]]:
+    """text 안에서 value가 나타나는 모든 위치의 (start, end)를 전부 찾는다
+    (완전일치만, 9번 표 "부분일치 옵션"은 오탐 위험 때문에 기본값에서 제외).
+
+    6.3.1(수동 추가 - 텍스트 직접 입력)과 6.3.3(동일 값 일괄 처리)이 공유하는
+    다중매칭 로직 -- 검토 화면에서 항목을 우클릭했을 때 문서 내 같은 문자열이
+    몇 곳에 더 있는지 찾는 데 씀.
+    """
+    if not value:
+        return []
+    out = []
+    start = 0
+    while (idx := text.find(value, start)) != -1:
+        out.append((idx, idx + len(value)))
+        start = idx + len(value)
+    return out
+
+
 def _dedupe(findings: list[Finding]) -> list[Finding]:
     # 같은 위치(start/end)가 서로 다른 규칙에 동시에 걸리는 경우가 있음
     # (예: "계좌" 라벨 근처의 전화번호가 전화번호+계좌번호로 이중 탐지됨) -> 하나만 남김

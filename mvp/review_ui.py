@@ -12,11 +12,16 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QHBoxLayout, QLabel,
+    QApplication, QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel,
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from detector import Finding
+
+# 결과물 파일명([문서유형]_[처리일자]_[일련번호].pdf, 6.6)에 쓰일 값.
+# 자동탐지에 맡기지 않고 검토자가 직접 고르게 해 오분류 리스크를 피함 (6.6) --
+# 직접 입력도 가능하도록 편집 가능한 콤보박스로 둠.
+DOC_TYPES = ["지출결의서", "민원처리결과", "감사결과보고", "일반문서"]
 
 
 class ReviewWindow(QDialog):
@@ -33,6 +38,15 @@ class ReviewWindow(QDialog):
             f"<b>{filename}</b> — 탐지된 개인정보 {len(findings)}건. "
             "기본적으로 전부 마스킹 대상입니다. 마스킹하면 안 되는 항목만 체크 해제하세요."
         ))
+
+        doc_type_row = QHBoxLayout()
+        doc_type_row.addWidget(QLabel("문서유형 (결과 파일명에 사용됨):"))
+        self.doc_type_combo = QComboBox()
+        self.doc_type_combo.setEditable(True)
+        self.doc_type_combo.addItems(DOC_TYPES)
+        doc_type_row.addWidget(self.doc_type_combo)
+        doc_type_row.addStretch()
+        layout.addLayout(doc_type_row)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -84,14 +98,16 @@ class ReviewWindow(QDialog):
     def _on_approve(self):
         for cb, f in self.checkboxes:
             f.approved = cb.isChecked()
+        # 빈 값으로 파일명이 만들어지지 않도록, 비어있으면 목록의 기본값으로 대체
+        self.doc_type = self.doc_type_combo.currentText().strip() or DOC_TYPES[-1]
         self.approved_result = True
         self.accept()
 
 
 def run_review(
     filename: str, findings: list[Finding], _auto_approve_after_ms: int | None = None
-) -> list[Finding] | None:
-    """검토 화면을 띄우고, 승인되면 approved 플래그가 반영된 findings를,
+) -> tuple[list[Finding], str] | None:
+    """검토 화면을 띄우고, 승인되면 (approved 플래그가 반영된 findings, 문서유형)을,
     취소/닫힘이면 None을 반환.
 
     _auto_approve_after_ms: 실사용에서는 쓰지 않음. 화면이 없는 환경(headless)에서
@@ -104,5 +120,5 @@ def run_review(
         QTimer.singleShot(_auto_approve_after_ms, window._on_approve)
     window.exec()
     if window.approved_result:
-        return findings
+        return findings, window.doc_type
     return None

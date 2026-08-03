@@ -29,13 +29,22 @@ def mask_name(word: str) -> str:
     return word[0] + "*" * (len(word) - 2) + word[-1]
 
 
+# PHONE_RE(detector.py)의 하이픈이 전부 선택(-?)이라, 실제 값은
+# "010-1234-5678"/"01012345678"/"010-12345678" 등 길이가 제각각일 수 있음.
+# 이전엔 항상 "XXX-****-XXXX" 고정 형태로 새로 만들어서, 하이픈 없는 번호가
+# 들어오면 원본보다 2글자 긴 문자열이 나와 뒤 2자리가 잘려나가는 버그가 있었음
+# (마스킹 함수는 길이를 보존해야 한다는 게 self_check의 전제 조건, 6.5.1-1 참고).
+# 원본 문자열의 실제 구조(하이픈 위치·자릿수)를 그대로 유지한 채 가운데 자리만
+# 마스킹해서, 형식에 관계없이 항상 원본과 같은 길이가 나오게 함.
+_PHONE_STRUCTURE_RE = re.compile(r"^(01[016789])(-?)(\d{3,4})(-?)(\d{4})$")
+
+
 def mask_phone(value: str) -> str:
-    digits = re.sub(r"\D", "", value)
-    if len(digits) == 11:
-        return f"{digits[:3]}-{'*' * 4}-{digits[7:]}"
-    if len(digits) == 10:
-        return f"{digits[:3]}-{'*' * 3}-{digits[6:]}"
-    return "*" * len(value)
+    m = _PHONE_STRUCTURE_RE.match(value)
+    if not m:
+        return "*" * len(value)
+    prefix, sep1, middle, sep2, last = m.groups()
+    return f"{prefix}{sep1}{'*' * len(middle)}{sep2}{last}"
 
 
 def mask_email(value: str) -> str:
@@ -101,6 +110,14 @@ def _plan_for_finding(f: Finding, full_text: str, spans: list[SpanRef]):
         return []
 
     masked = mask_value(f)
+    if len(masked) != len(f.value):
+        # 아래 좌표/슬라이싱 계산 전부가 "마스킹 함수는 항상 원본과 같은 길이를
+        # 돌려준다"는 전제에 기대고 있음 (self_check도 마찬가지, 6.5.1-1 참고).
+        # 이 전제가 깨지면(예: mask_phone이 "010-****-5678" 고정 형태로 재구성해서
+        # 하이픈 없는 원본보다 길어졌던 버그) 잘못된 내용이 조용히 저장될 수 있으므로,
+        # 안 맞으면 이 항목은 처리하지 않고 self_check가 저장을 막게 함
+        return []
+
     plans = []
     for span in spans_covering(spans, f.start, f.end):
         local_lo = max(f.start, span.start) - span.start
@@ -235,9 +252,18 @@ def mask_pdf(input_path: str, findings: list[Finding], output_path: str) -> Mask
 
     scrub_metadata(doc)
 
-    # 6.5.2: 임시 파일에 먼저 쓰고, 검증 통과 후에만 최종 파일로 원자적 교체
+    # 6.5.2: 임시 파일에 먼저 쓰고, 검증 통과 후에만 최종 파일로 원자적 교체.
+    # doc.save()가 실패하면(디스크 공간 부족 등) doc이 안 닫히고 tmp_path에
+    # 불완전한 파일이 남을 수 있었음 -> 6.5.2가 요구하는 "성공/실패 불문 정리"
+    # 원칙에 맞게 실패 시에도 doc을 닫고 남은 tmp 파일을 지운 뒤 예외를 그대로 전파
     tmp_path = output_path + ".tmp"
-    doc.save(tmp_path)
+    try:
+        doc.save(tmp_path)
+    except Exception:
+        doc.close()
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
     doc.close()
     os.replace(tmp_path, output_path)
 

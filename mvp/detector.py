@@ -209,15 +209,21 @@ def apply_cross_validation(text: str, findings: list[Finding]) -> list[Finding]:
     """
     findings = list(findings)
 
-    # 규칙 1
+    # 규칙 1: 줄 단위로 한 번만 판단. 같은 줄에 라벨 붙은 전화번호가 여러 개
+    # 있으면 각각 순회할 때마다 같은 이름이 반복 상향되어 "낮음"이 "중간"을
+    # 건너뛰고 "높음"까지 튀는 버그가 있었음 -> 이 줄에서 상향할지 여부를
+    # 먼저 한 번만 결정한 뒤, 그 줄의 이름들을 한 번씩만 상향
+    qualifying_lines: set[tuple[int, int]] = set()
     for f in findings:
         if f.type != "전화번호":
             continue
         line_start, line_end = _line_span(text, f.start)
         if _PHONE_LABEL_RE.search(text[line_start:f.start]):
-            for other in findings:
-                if other.type == "이름" and line_start <= other.start < line_end:
-                    _bump_confidence(other)
+            qualifying_lines.add((line_start, line_end))
+    for line_start, line_end in qualifying_lines:
+        for other in findings:
+            if other.type == "이름" and line_start <= other.start < line_end:
+                _bump_confidence(other)
 
     # 규칙 2
     label_ends = [lm.end() for lm in _NAME_LABEL_RE.finditer(text)]

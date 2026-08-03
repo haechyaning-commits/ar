@@ -14,3 +14,5 @@ mvp/원본_보관/
 mvp/마스킹완료/
 mvp/요약리포트/
 mvp/로그/
+mvp/data/dictionary_candidates.csv
+mvp/data/dictionary_learning_log.csv

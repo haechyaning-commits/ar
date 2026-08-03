@@ -33,6 +33,14 @@
 - 문서 유형 선택: 결과 파일명 규칙(6.6, `[문서유형]_[처리일자]_[일련번호].pdf`)에
   쓸 문서유형을 검토자가 직접 고름 -- 자동 판별하지 않음(설계서 6.6: "문서유형은
   검토 단계에서 사람이 직접 선택")
+- 사전 자동 학습(6.2.1): 검토자가 이미 하는 행동(자동탐지 이름 체크 해제 = 제외
+  후보, 수동으로 이름 추가 = 성씨 후보)만으로 조용히 후보를 누적(`dictionary_learning`).
+  확인 팝업 없이 통보만 하고, 임계값(3회) 도달 시 실제 사전에 반영 + `detector.reload_dictionaries()`로
+  즉시 재적용(배치 처리 중 다음 파일부터 바로 반영되도록)
+- 자체검증 실패 후 재시도: main.py가 self-check 실패로 이 화면을 다시 띄울 때
+  `retry_notice`/`highlight_spans`를 넘기면, 안내 문구와 함께 안 지워진 항목에
+  "⚠[미제거]" 표시를 붙여 검토자가 바로 찾아 재확인할 수 있게 함(8번 리스크의
+  "실패 후 후속 흐름" 요구사항)
 - "승인" 버튼을 눌러야 다음 단계(마스킹)로 넘어감
 
 MVP 범위: 사이드바 항목 점프, 단축키, 실행취소(Undo) 등은 향후 확장으로 남겨두고
@@ -49,7 +57,8 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
-from detector import CONFIDENCE_LEVELS, Finding, find_occurrences
+import dictionary_learning
+from detector import CONFIDENCE_LEVELS, Finding, find_occurrences, reload_dictionaries
 from output import DOCUMENT_TYPES
 from page_viewer import PageViewerDialog
 from pdf_extract import SpanRef, page_of
@@ -59,6 +68,7 @@ class ReviewWindow(QDialog):
     def __init__(
         self, filename: str, findings: list[Finding], full_text: str = "",
         spans: list[SpanRef] | None = None, total_pages: int = 1, input_path: str = "",
+        retry_notice: str | None = None, highlight_spans: set[tuple[int, int]] | None = None,
     ):
         super().__init__()
         self.setWindowTitle(f"검토 - {filename}")
@@ -69,6 +79,7 @@ class ReviewWindow(QDialog):
         self.spans = spans or []
         self.total_pages = max(total_pages, 1)
         self.input_path = input_path
+        self.highlight_spans = highlight_spans or set()
         self.checkboxes: list[tuple[QCheckBox, Finding]] = []
         self.finding_page: dict[int, int] = {}  # id(finding) -> page_index
         self.page_buttons: dict[int, QPushButton] = {}
@@ -82,6 +93,12 @@ class ReviewWindow(QDialog):
             f"<b>{filename}</b> — 탐지된 개인정보 {len(findings)}건. "
             "기본적으로 전부 마스킹 대상입니다. 마스킹하면 안 되는 항목만 체크 해제하세요."
         ))
+
+        if retry_notice:
+            notice = QLabel(f"⚠ {retry_notice}")
+            notice.setStyleSheet("color: #b00; font-weight: bold;")
+            notice.setWordWrap(True)
+            layout.addWidget(notice)
 
         doc_type_row = QHBoxLayout()
         doc_type_row.addWidget(QLabel("문서 유형 (결과 파일명에 사용):"))
@@ -232,7 +249,8 @@ class ReviewWindow(QDialog):
             tags.append("6.3.1 수동 추가")
         if f.cross_validated:
             tags.append("6.2.3 교차검증 반영")
-        cb = QCheckBox(f"[{f.type}] {f.value} ({', '.join(tags)})")
+        marker = "⚠[미제거] " if (f.start, f.end) in self.highlight_spans else ""
+        cb = QCheckBox(f"{marker}[{f.type}] {f.value} ({', '.join(tags)})")
         cb.setChecked(f.approved)
         cb.setContextMenuPolicy(Qt.CustomContextMenu)
         cb.customContextMenuRequested.connect(lambda pos, box=cb, finding=f: self._show_context_menu(box, finding, pos))
@@ -297,7 +315,7 @@ class ReviewWindow(QDialog):
                 # 그대로 흘러감). "전체 해제"는 애초에 대상이 아니던 위치를 새로
                 # 만들 이유가 없으므로 그냥 건너뜀
                 new_f = Finding(f.type, f.value, start, end, group="동일값추가",
-                                 approved=True, confidence="낮음")
+                                 approved=True, confidence="낮음", source="수동")
                 self.findings.append(new_f)
                 self._add_row_before_stretch(new_f)
 
@@ -312,6 +330,13 @@ class ReviewWindow(QDialog):
         # 여기서는 체크박스 행/페이지 진행바만 새로 추가된 만큼 따라잡으면 됨
         for f in dlg.new_findings:
             self._add_row_before_stretch(f)
+            if f.type == "이름" and f.value:
+                # 6.2.1: 수동으로 이름을 추가하는 행동을 "성씨 후보" 신호로 기록.
+                # SURNAMES는 성씨(대개 1글자)만 담는 사전이라 전체 이름이 아니라
+                # 첫 글자만 후보로 씀 (남궁/황보 같은 2글자 성씨는 이 근사치로는 못 배움).
+                if dictionary_learning.record_candidate(f.value[0], "이름후보"):
+                    reload_dictionaries()
+                    self.status_label.setText(f"[사전 자동학습] '{f.value[0]}' 성씨 후보로 반영했습니다.")
 
     def _on_approve(self):
         self._check_visible_rows()  # 마지막으로 화면에 있는 상태를 승인 직전 한 번 더 반영
@@ -325,7 +350,12 @@ class ReviewWindow(QDialog):
             )
             return
         for cb, f in self.checkboxes:
+            newly_unchecked = f.approved and not cb.isChecked()
             f.approved = cb.isChecked()
+            if newly_unchecked and f.type == "이름" and f.source == "자동":
+                # 6.2.1: 자동탐지된 이름을 체크 해제하는 행동을 "제외어 후보" 신호로 기록
+                if dictionary_learning.record_candidate(f.value, "제외"):
+                    reload_dictionaries()
         self.doc_type = self.doc_type_combo.currentText()
         self.approved_result = True
         self.accept()
@@ -341,6 +371,7 @@ def run_review(
     filename: str, findings: list[Finding], full_text: str = "",
     spans: list[SpanRef] | None = None, total_pages: int = 1, input_path: str = "",
     _auto_approve_after_ms: int | None = None,
+    retry_notice: str | None = None, highlight_spans: set[tuple[int, int]] | None = None,
 ) -> ReviewResult | None:
     """검토 화면을 띄우고, 승인되면 approved 플래그가 반영된 findings와 선택한
     문서 유형을 ReviewResult로, 취소/닫힘이면 None을 반환.
@@ -353,9 +384,12 @@ def run_review(
     _auto_approve_after_ms: 실사용에서는 쓰지 않음. 화면이 없는 환경(headless)에서
     통합 테스트할 때만 사용 — 지정한 시간 뒤 모든 페이지를 확인 표시하고
     승인 버튼을 누른 것처럼 동작(6.3.4 도입 후에도 자동 테스트가 막히지 않도록).
+    retry_notice/highlight_spans: 자체 재검증 실패 후 이 화면으로 복귀할 때
+    main.py가 넘겨주는 안내 문구와 "안 지워진" 항목의 (start, end) 위치.
     """
     app = QApplication.instance() or QApplication([])
-    window = ReviewWindow(filename, findings, full_text, spans, total_pages, input_path)
+    window = ReviewWindow(filename, findings, full_text, spans, total_pages, input_path,
+                           retry_notice, highlight_spans)
     if _auto_approve_after_ms is not None:
         from PySide6.QtCore import QTimer
 

@@ -74,6 +74,28 @@ def mask_full(value: str) -> str:
     return "".join("*" if c.isalnum() else c for c in value)
 
 
+# 9번 표(확인 필요한 가정): 계좌/카드번호는 완전마스킹이 잠정 스펙이지만,
+# 조회 가용성을 위해 끝자리를 남기는 부분마스킹으로 바뀔 수 있다고 명시돼 있음
+# -> 하드코딩하지 말고 여기 상수 하나만 바꾸면 정책을 전환할 수 있게 함.
+ACCOUNT_CARD_MASK_FULL = True  # True=완전마스킹(현재 잠정 스펙) / False=끝 4자리 유지
+
+
+def _mask_partial_keep_last(value: str, keep: int = 4) -> str:
+    """뒤에서 keep개의 영문/숫자만 남기고 나머지 영문/숫자는 마스킹, 구분자는 그대로 유지."""
+    alnum_positions = [i for i, c in enumerate(value) if c.isalnum()]
+    keep_positions = set(alnum_positions[-keep:])
+    return "".join(
+        c if (not c.isalnum()) or i in keep_positions else "*"
+        for i, c in enumerate(value)
+    )
+
+
+def mask_account_or_card(value: str) -> str:
+    if ACCOUNT_CARD_MASK_FULL:
+        return mask_full(value)
+    return _mask_partial_keep_last(value, keep=4)
+
+
 def mask_value(f: Finding) -> str:
     if f.type == "이름":
         return mask_name(f.value)
@@ -83,7 +105,9 @@ def mask_value(f: Finding) -> str:
         return mask_email(f.value)
     if f.type == "주소":
         return mask_address(f.value)
-    if f.type in ("주민등록번호", "여권번호", "계좌번호"):
+    if f.type in ("계좌번호", "카드번호"):
+        return mask_account_or_card(f.value)
+    if f.type in ("주민등록번호", "여권번호"):
         return mask_full(f.value)
     return "*" * len(f.value)
 

@@ -220,7 +220,7 @@ class PageViewerDialog(QDialog):
             return
 
         guessed_type = classify_value(value)
-        f = Finding(guessed_type, value, start, end, group=group, approved=True, confidence="낮음")
+        f = Finding(guessed_type, value, start, end, group=group, approved=True, confidence="낮음", source="수동")
         self.findings.append(f)
         self.new_findings.append(f)
         self.type_combo.setCurrentText(guessed_type)

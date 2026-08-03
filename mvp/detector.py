@@ -25,6 +25,16 @@ EXCLUDE_WORDS = _load_lines("exclude_words.txt")
 REGIONS = _load_lines("regions.txt")
 SURNAMES_SORTED = sorted(SURNAMES, key=len, reverse=True)
 
+
+def reload_dictionaries() -> None:
+    """6.2.1 사전 자동학습이 사전 파일을 갱신한 뒤 호출 -- 배치 처리(같은
+    프로세스 안에서 여러 파일을 순차 처리)의 다음 파일부터 바로 반영되게 함."""
+    global SURNAMES, EXCLUDE_WORDS, REGIONS, SURNAMES_SORTED
+    SURNAMES = _load_lines("surnames.txt")
+    EXCLUDE_WORDS = _load_lines("exclude_words.txt")
+    REGIONS = _load_lines("regions.txt")
+    SURNAMES_SORTED = sorted(SURNAMES, key=len, reverse=True)
+
 BUSINESS_TITLES = [
     "팀장", "과장", "차장", "부장", "국장", "실장", "본부장", "이사",
     "계장", "반장", "주임", "대리", "사원", "감사관", "위원",
@@ -42,6 +52,10 @@ RRN_RE = re.compile(r"\d{6}-\d{7}")
 PASSPORT_RE = re.compile(r"\b[A-Z]\d{8}\b")
 # 계좌번호는 은행마다 자릿수가 달라 패턴만으론 오탐이 많음 -> "계좌" 문맥 근처에서만 인정
 ACCOUNT_RE = re.compile(r"\d{2,6}-\d{1,6}-\d{2,8}")
+# 카드번호(설계서 2번 범위 항목 -- 계좌번호만 있고 빠져있던 부분 추가): 4자리씩
+# 4묶음이 국내외 카드 공통 형식이라 이 패턴만 쓰고, 계좌번호와 마찬가지로
+# "카드" 문맥 근처에서만 인정해 순수 숫자열 오탐을 줄임
+CARD_RE = re.compile(r"\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b")
 
 
 # 6.3.5 저신뢰 항목 우선 정렬 기준. 탐지 방식별 기본 확신도(낮음/중간/높음).
@@ -50,7 +64,7 @@ CONFIDENCE_LEVELS = ["낮음", "중간", "높음"]
 
 @dataclass
 class Finding:
-    type: str            # 이름 | 전화번호 | 이메일 | 계좌번호 | 주민등록번호 | 여권번호 | 주소
+    type: str            # 이름 | 전화번호 | 이메일 | 계좌번호 | 카드번호 | 주민등록번호 | 여권번호 | 주소
     value: str
     start: int
     end: int
@@ -58,6 +72,7 @@ class Finding:
     approved: bool = True     # 검토 화면 기본값: 전체 승인 (6.3)
     confidence: str = "중간"  # 낮음 | 중간 | 높음 (6.3.5 정렬 기준, 6.2.3 교차검증으로 조정됨)
     cross_validated: bool = False  # 6.2.3 교차검증 규칙으로 확신도가 상향/신규 추가된 항목
+    source: str = "자동"      # 자동 | 수동 (6.3.1) -- 로그의 탐지출처 구분(6.7)에 사용
 
     def __repr__(self):
         return (f"Finding({self.type!r}, {self.value!r}, [{self.start}:{self.end}], "
@@ -105,6 +120,17 @@ def detect_account(text: str) -> list[Finding]:
         window = text[window_start:m.start()]
         if "계좌" in window or "입금" in window or "예금주" in window:
             out.append(Finding("계좌번호", m.group(), m.start(), m.end(), confidence="높음"))
+    return out
+
+
+def detect_card(text: str) -> list[Finding]:
+    out = []
+    for m in CARD_RE.finditer(text):
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        window_start = max(line_start, m.start() - 15)
+        window = text[window_start:m.start()]
+        if "카드" in window:
+            out.append(Finding("카드번호", m.group(), m.start(), m.end()))
     return out
 
 
@@ -282,6 +308,8 @@ def classify_value(value: str) -> str:
         return "여권번호"
     if ACCOUNT_RE.fullmatch(value):
         return "계좌번호"
+    if CARD_RE.fullmatch(value):
+        return "카드번호"
     if HANGUL_RUN_RE.fullmatch(value) and _is_surname_word(value):
         return "이름"
     if any(r in value for r in REGIONS):
@@ -310,6 +338,7 @@ def detect_all(text: str) -> list[Finding]:
     findings += detect_rrn(text)
     findings += detect_passport(text)
     findings += detect_account(text)
+    findings += detect_card(text)
     findings += detect_names(text)
     findings += detect_addresses(text)
 

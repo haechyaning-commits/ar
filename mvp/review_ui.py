@@ -3,10 +3,13 @@
 
 - 기본값: 전체 승인 상태(체크됨) — 검토자는 틀린 것만 체크 해제
 - "업무상 성명 후보"는 별도로 묶어 보여주되, 기본 마스킹 대상인 건 동일 (6.2/6.3 정책)
+- 저신뢰 항목 우선 정렬 (6.3.5): 탐지 확신도가 낮은 순으로 목록을 정렬해,
+  검토자가 애매한 항목부터 먼저 살펴볼 수 있도록 함. 확신도는 6.2.3 교차검증
+  규칙으로 조정된 값을 그대로 사용 (별도 정렬 로직을 새로 만들지 않음)
 - "승인" 버튼을 눌러야 다음 단계(마스킹)로 넘어감
 
 MVP 범위: 사이드바 항목 점프, 단축키, 실행취소(Undo) 등은 향후 확장으로 남겨두고
-"전체승인 + 예외 해제"라는 핵심 동작만 구현.
+"전체승인 + 예외 해제" + "저신뢰 우선 정렬"까지만 구현.
 """
 from __future__ import annotations
 
@@ -16,7 +19,7 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
-from detector import Finding
+from detector import CONFIDENCE_LEVELS, Finding
 
 
 class ReviewWindow(QDialog):
@@ -39,11 +42,14 @@ class ReviewWindow(QDialog):
         inner = QWidget()
         inner_layout = QVBoxLayout(inner)
 
-        basic = [f for f in findings if f.group == "기본"]
-        business = [f for f in findings if f.group == "업무상성명후보"]
+        def by_confidence(items: list[Finding]) -> list[Finding]:
+            return sorted(items, key=lambda f: CONFIDENCE_LEVELS.index(f.confidence))
+
+        basic = by_confidence([f for f in findings if f.group in ("기본", "교차검증후보")])
+        business = by_confidence([f for f in findings if f.group == "업무상성명후보"])
 
         if basic:
-            inner_layout.addWidget(QLabel("<b>개인정보 (기본)</b>"))
+            inner_layout.addWidget(QLabel("<b>개인정보 (기본)</b> — 확신도 낮은 순"))
             for f in basic:
                 self._add_row(inner_layout, f)
 
@@ -72,7 +78,9 @@ class ReviewWindow(QDialog):
         layout.addLayout(btn_row)
 
     def _add_row(self, layout: QVBoxLayout, f: Finding):
-        cb = QCheckBox(f"[{f.type}] {f.value}")
+        label = f"[{f.type}] {f.value} (확신도: {f.confidence}"
+        label += ", 6.2.3 교차검증 반영)" if f.cross_validated else ")"
+        cb = QCheckBox(label)
         cb.setChecked(f.approved)
         layout.addWidget(cb)
         self.checkboxes.append((cb, f))

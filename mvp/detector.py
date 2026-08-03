@@ -44,17 +44,24 @@ PASSPORT_RE = re.compile(r"\b[A-Z]\d{8}\b")
 ACCOUNT_RE = re.compile(r"\d{2,6}-\d{1,6}-\d{2,8}")
 
 
+# 6.3.5 저신뢰 항목 우선 정렬 기준. 탐지 방식별 기본 확신도(낮음/중간/높음).
+CONFIDENCE_LEVELS = ["낮음", "중간", "높음"]
+
+
 @dataclass
 class Finding:
     type: str            # 이름 | 전화번호 | 이메일 | 계좌번호 | 주민등록번호 | 여권번호 | 주소
     value: str
     start: int
     end: int
-    group: str = "기본"       # 기본 | 업무상성명후보
+    group: str = "기본"       # 기본 | 업무상성명후보 | 교차검증후보
     approved: bool = True     # 검토 화면 기본값: 전체 승인 (6.3)
+    confidence: str = "중간"  # 낮음 | 중간 | 높음 (6.3.5 정렬 기준, 6.2.3 교차검증으로 조정됨)
+    cross_validated: bool = False  # 6.2.3 교차검증 규칙으로 확신도가 상향/신규 추가된 항목
 
     def __repr__(self):
-        return f"Finding({self.type!r}, {self.value!r}, [{self.start}:{self.end}], group={self.group!r})"
+        return (f"Finding({self.type!r}, {self.value!r}, [{self.start}:{self.end}], "
+                f"group={self.group!r}, confidence={self.confidence!r})")
 
 
 def _rrn_checksum_valid(rrn: str) -> bool:
@@ -68,21 +75,24 @@ def _rrn_checksum_valid(rrn: str) -> bool:
 
 
 def detect_phone(text: str) -> list[Finding]:
-    return [Finding("전화번호", m.group(), m.start(), m.end()) for m in PHONE_RE.finditer(text)]
+    return [Finding("전화번호", m.group(), m.start(), m.end(), confidence="높음")
+            for m in PHONE_RE.finditer(text)]
 
 
 def detect_email(text: str) -> list[Finding]:
-    return [Finding("이메일", m.group(), m.start(), m.end()) for m in EMAIL_RE.finditer(text)]
+    return [Finding("이메일", m.group(), m.start(), m.end(), confidence="높음")
+            for m in EMAIL_RE.finditer(text)]
 
 
 def detect_rrn(text: str) -> list[Finding]:
     # 체크섬 불일치인 건 실제 주민번호가 아닐 가능성이 높아 제외 (오탐 축소, 8번 리스크 항목)
-    return [Finding("주민등록번호", m.group(), m.start(), m.end())
+    return [Finding("주민등록번호", m.group(), m.start(), m.end(), confidence="높음")
             for m in RRN_RE.finditer(text) if _rrn_checksum_valid(m.group())]
 
 
 def detect_passport(text: str) -> list[Finding]:
-    return [Finding("여권번호", m.group(), m.start(), m.end()) for m in PASSPORT_RE.finditer(text)]
+    return [Finding("여권번호", m.group(), m.start(), m.end(), confidence="높음")
+            for m in PASSPORT_RE.finditer(text)]
 
 
 def detect_account(text: str) -> list[Finding]:
@@ -94,7 +104,7 @@ def detect_account(text: str) -> list[Finding]:
         window_start = max(line_start, m.start() - 15)
         window = text[window_start:m.start()]
         if "계좌" in window or "입금" in window or "예금주" in window:
-            out.append(Finding("계좌번호", m.group(), m.start(), m.end()))
+            out.append(Finding("계좌번호", m.group(), m.start(), m.end(), confidence="높음"))
     return out
 
 
@@ -120,12 +130,12 @@ def detect_names(text: str) -> list[Finding]:
 
     for start, end, word in _find_after_labels(text, NAME_LABELS):
         if _is_surname_word(word) and (start, end) not in seen:
-            out.append(Finding("이름", word, start, end, group="기본"))
+            out.append(Finding("이름", word, start, end, group="기본", confidence="중간"))
             seen.add((start, end))
 
     for start, end, word in _find_after_labels(text, BUSINESS_LABELS):
         if _is_surname_word(word) and (start, end) not in seen:
-            out.append(Finding("이름", word, start, end, group="업무상성명후보"))
+            out.append(Finding("이름", word, start, end, group="업무상성명후보", confidence="낮음"))
             seen.add((start, end))
 
     # "직위+이름" 패턴 (예: "감사팀장 홍길동")
@@ -133,7 +143,7 @@ def detect_names(text: str) -> list[Finding]:
     for m in title_pattern.finditer(text):
         start, end, word = m.start(2), m.end(2), m.group(2)
         if _is_surname_word(word) and (start, end) not in seen:
-            out.append(Finding("이름", word, start, end, group="업무상성명후보"))
+            out.append(Finding("이름", word, start, end, group="업무상성명후보", confidence="낮음"))
             seen.add((start, end))
 
     return out
@@ -148,8 +158,84 @@ def detect_addresses(text: str) -> list[Finding]:
             line_end = len(text)
         addr = text[m.start():line_end].strip()
         if len(addr) > len(m.group()):  # 지역명 단독은 주소로 안 봄
-            out.append(Finding("주소", addr, m.start(), m.start() + len(addr)))
+            out.append(Finding("주소", addr, m.start(), m.start() + len(addr), confidence="낮음"))
     return out
+
+
+def _line_span(text: str, pos: int) -> tuple[int, int]:
+    line_start = text.rfind("\n", 0, pos) + 1
+    line_end = text.find("\n", pos)
+    if line_end == -1:
+        line_end = len(text)
+    return line_start, line_end
+
+
+def _bump_confidence(f: Finding) -> None:
+    idx = CONFIDENCE_LEVELS.index(f.confidence)
+    if idx < len(CONFIDENCE_LEVELS) - 1:
+        f.confidence = CONFIDENCE_LEVELS[idx + 1]
+    f.cross_validated = True
+
+
+# 6.2.3 규칙1: 이 라벨이 전화번호 앞에 있으면 같은 줄의 이름 탐지 확신도를 상향
+PHONE_CONTEXT_LABELS = ["발신자", "연락처"]
+_PHONE_LABEL_RE = re.compile("(" + "|".join(PHONE_CONTEXT_LABELS) + r")\s*[:：]")
+# 6.2.3 규칙2: 반복되는 라벨 패턴에서 놓친 위치를 우선 탐지 후보로 격상
+_NAME_LABEL_RE = re.compile(r"성명\s*[:：]\s*")
+
+
+def apply_cross_validation(text: str, findings: list[Finding]) -> list[Finding]:
+    """6.2.3 교차검증 규칙: 서로 다른 탐지 결과끼리 문맥으로 서로의 확신도를 보강.
+
+    규칙1: 전화번호 주변에 "발신자:"/"연락처:" 라벨이 있으면, 같은 줄에 있는
+           이름 탐지 항목의 확신도를 한 단계 상향(높음 이상 정보인 전화번호가
+           라벨로 확정됐으므로, 같은 줄의 이름도 맞을 확률이 높다고 봄).
+    규칙2: "성명:" 라벨 뒤에 이미 확정된 이름이 있고, 문서 내 같은 라벨 패턴이
+           반복되는데 이름이 탐지되지 않은 위치가 있으면(예: 성씨사전에 없는
+           이름), 그 위치를 낮은 확신도의 우선 탐지 후보로 새로 추가.
+    """
+    findings = list(findings)
+
+    # 규칙 1
+    for f in findings:
+        if f.type != "전화번호":
+            continue
+        line_start, line_end = _line_span(text, f.start)
+        if _PHONE_LABEL_RE.search(text[line_start:f.start]):
+            for other in findings:
+                if other.type == "이름" and line_start <= other.start < line_end:
+                    _bump_confidence(other)
+
+    # 규칙 2
+    label_ends = [lm.end() for lm in _NAME_LABEL_RE.finditer(text)]
+    confirmed_starts = {f.start for f in findings if f.type == "이름"}
+    has_confirmed_repeat = any(e in confirmed_starts for e in label_ends)
+    if has_confirmed_repeat:
+        for e in label_ends:
+            if e in confirmed_starts:
+                continue
+            wm = HANGUL_RUN_RE.match(text[e:e + 10])
+            if wm:
+                findings.append(Finding(
+                    "이름", wm.group(), e + wm.start(), e + wm.end(),
+                    group="교차검증후보", confidence="낮음", cross_validated=True,
+                ))
+
+    return findings
+
+
+def _dedupe(findings: list[Finding]) -> list[Finding]:
+    # 같은 위치(start/end)가 서로 다른 규칙에 동시에 걸리는 경우가 있음
+    # (예: "계좌" 라벨 근처의 전화번호가 전화번호+계좌번호로 이중 탐지됨) -> 하나만 남김
+    seen_spans: set[tuple[int, int]] = set()
+    deduped: list[Finding] = []
+    for f in findings:
+        key = (f.start, f.end)
+        if key in seen_spans:
+            continue
+        seen_spans.add(key)
+        deduped.append(f)
+    return deduped
 
 
 def detect_all(text: str) -> list[Finding]:
@@ -162,17 +248,9 @@ def detect_all(text: str) -> list[Finding]:
     findings += detect_names(text)
     findings += detect_addresses(text)
 
-    # 같은 위치(start/end)가 서로 다른 규칙에 동시에 걸리는 경우가 있음
-    # (예: "계좌" 라벨 근처의 전화번호가 전화번호+계좌번호로 이중 탐지됨) -> 하나만 남김
-    seen_spans: set[tuple[int, int]] = set()
-    deduped: list[Finding] = []
-    for f in findings:
-        key = (f.start, f.end)
-        if key in seen_spans:
-            continue
-        seen_spans.add(key)
-        deduped.append(f)
-    findings = deduped
+    findings = _dedupe(findings)
+    findings = apply_cross_validation(text, findings)
+    findings = _dedupe(findings)
 
     findings.sort(key=lambda f: f.start)
     return findings
@@ -186,6 +264,9 @@ if __name__ == "__main__":
         "입금계좌: 국민은행 123456-04-789012 (예금주: 김테스트)\n"
         "이메일: test.dummy@example.com\n"
         "주소: 서울특별시 강남구 테헤란로 123\n"
+        "연락처: 010-9999-8888 (담당: 최민수)\n"  # 규칙1: 라벨+전화번호 옆 이름 확신도 상향 확인용
+        "성명: 김철수\n"
+        "성명: 삼식이\n"  # 성씨사전에 없는 더미 이름 -> 규칙2로 우선 탐지 후보 격상 확인용
         "기안자: 이감사 / 검토: 박팀장 / 결재: 최과장\n"
     )
     for f in detect_all(sample):

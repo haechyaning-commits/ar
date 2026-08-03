@@ -56,6 +56,7 @@ class ReviewWindow(QDialog):
         self, filename: str, findings: list[Finding], full_text: str,
         retry_notice: str | None = None,
         highlight_spans: set[tuple[int, int]] | None = None,
+        initial_doc_type: str | None = None,
     ):
         super().__init__()
         self.setWindowTitle(f"검토 - {filename}")
@@ -83,6 +84,10 @@ class ReviewWindow(QDialog):
         self.doc_type_combo = QComboBox()
         self.doc_type_combo.setEditable(True)
         self.doc_type_combo.addItems(DOC_TYPES)
+        if initial_doc_type:
+            # 재검증 실패 후 검토 화면 복귀(6.5.1) 시 이전에 고른 문서유형이
+            # 목록 첫 값으로 초기화되던 문제 -- 이전 선택을 그대로 이어받음
+            self.doc_type_combo.setCurrentText(initial_doc_type)
         doc_type_row.addWidget(self.doc_type_combo)
         doc_type_row.addStretch()
         layout.addLayout(doc_type_row)
@@ -263,6 +268,7 @@ def run_review(
     _auto_approve_after_ms: int | None = None,
     retry_notice: str | None = None,
     highlight_spans: set[tuple[int, int]] | None = None,
+    initial_doc_type: str | None = None,
 ) -> tuple[list[Finding], str] | None:
     """검토 화면을 띄우고, 승인되면 (승인/수동추가 반영된 findings, 문서유형)을,
     취소/닫힘이면 None을 반환.
@@ -270,11 +276,14 @@ def run_review(
     full_text: 수동 추가(6.3.1) 시 텍스트 검색 대상이 되는 문서 전체 텍스트.
     retry_notice / highlight_spans: 자체 재검증 실패 후 검토 화면으로 복귀할 때
     (6.5.1) 사용 -- 실제 값은 보여주지 않고 문구 + 항목 표시로만 안내 (6.5.3).
+    initial_doc_type: 재시도 시 이전에 고른 문서유형을 이어받기 위한 값.
     _auto_approve_after_ms: 실사용에서는 쓰지 않음. 화면이 없는 환경(headless)에서
     통합 테스트할 때만 사용 — 지정한 시간 뒤 자동으로 승인 버튼을 누른 것처럼 동작.
     """
     app = QApplication.instance() or QApplication([])
-    window = ReviewWindow(filename, findings, full_text, retry_notice, highlight_spans)
+    window = ReviewWindow(
+        filename, findings, full_text, retry_notice, highlight_spans, initial_doc_type,
+    )
     if _auto_approve_after_ms is not None:
         from PySide6.QtCore import QTimer
         QTimer.singleShot(_auto_approve_after_ms, window._on_approve)

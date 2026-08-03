@@ -49,16 +49,19 @@ def process_file(input_path: str, output_path: str | None = None,
     print(f"[{src.name}] {len(findings)}건 탐지됨 -> 검토 화면 표시")
     retry_notice: str | None = None
     highlight_spans: set[tuple[int, int]] = set()
+    last_doc_type: str | None = None
 
     while True:
         reviewed = run_review(
             src.name, findings, full_text, _auto_approve_after_ms,
             retry_notice=retry_notice, highlight_spans=highlight_spans,
+            initial_doc_type=last_doc_type,
         )
         if reviewed is None:
             print(f"[{src.name}] 검토가 취소되었습니다. 처리하지 않음.")
             return 2
         findings, doc_type = reviewed
+        last_doc_type = doc_type
 
         current_output_path = explicit_output_path or str(build_output_path(src.parent, doc_type))
         result = mask_pdf(input_path, findings, current_output_path)

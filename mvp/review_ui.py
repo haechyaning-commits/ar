@@ -16,7 +16,9 @@ MVP 범위: 사이드바 항목 점프, 단축키, 실행취소(Undo), 드래그
 """
 from __future__ import annotations
 
+import fitz  # PyMuPDF -- 문서 미리보기 렌더링용
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
@@ -25,6 +27,42 @@ from PySide6.QtWidgets import (
 
 import dictionary_learning
 from detector import Finding, reload_dictionaries
+
+STYLESHEET = """
+QDialog {
+    background-color: #f5f6f8;
+    font-family: "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+    font-size: 13px;
+    color: #1f2328;
+}
+QLabel { color: #1f2328; }
+QLabel#pageLabel { color: #57606a; font-size: 12px; }
+QPushButton {
+    background-color: #ffffff;
+    border: 1px solid #c9ccd1;
+    border-radius: 6px;
+    padding: 6px 14px;
+}
+QPushButton:hover { background-color: #eef1f5; }
+QPushButton:disabled { color: #9aa1a8; background-color: #f0f1f3; }
+QPushButton#approveBtn {
+    background-color: #2563eb;
+    color: white;
+    border: none;
+    font-weight: bold;
+    padding: 8px 20px;
+}
+QPushButton#approveBtn:hover { background-color: #1d4ed8; }
+QCheckBox { padding: 4px 2px; }
+QComboBox, QLineEdit {
+    border: 1px solid #c9ccd1;
+    border-radius: 4px;
+    padding: 4px 6px;
+    background: white;
+}
+QScrollArea { border: 1px solid #dfe2e6; border-radius: 8px; background: white; }
+QListWidget { border: 1px solid #dfe2e6; border-radius: 4px; background: white; }
+"""
 
 
 def confirm_reprocess(filename: str, reasons: list[str], _auto_confirm: bool | None = None) -> bool:
@@ -83,18 +121,27 @@ class ReviewWindow(QDialog):
         retry_notice: str | None = None,
         highlight_spans: set[tuple[int, int]] | None = None,
         initial_doc_type: str | None = None,
+        pdf_path: str | None = None,
     ):
         super().__init__()
         self.setWindowTitle(f"검토 - {filename}")
-        self.resize(560, 560)
+        self.resize(980, 680)
+        self.setStyleSheet(STYLESHEET)
         self.findings = findings
         self.full_text = full_text
         self.highlight_spans = highlight_spans or set()
         self.checkboxes: list[tuple[QCheckBox, Finding]] = []
         self.approved_result: bool | None = None  # None=닫힘/취소, True=승인
+        self._preview_doc: fitz.Document | None = None
+        self._preview_page_index = 0
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
+        outer = QHBoxLayout(self)
+        outer.addLayout(self._build_preview_panel(pdf_path), stretch=1)
+
+        right = QVBoxLayout()
+        outer.addLayout(right, stretch=1)
+
+        right.addWidget(QLabel(
             f"<b>{filename}</b> — 탐지된 개인정보 {len(findings)}건. "
             "기본적으로 전부 마스킹 대상입니다. 마스킹하면 안 되는 항목만 체크 해제하세요."
         ))
@@ -103,11 +150,12 @@ class ReviewWindow(QDialog):
             # 6.5.1: 재검증 실패 후 복귀 -- 실제 값은 보여주지 않고(6.5.3) 건수/안내만 표시
             notice_label = QLabel(f"⚠ {retry_notice}")
             notice_label.setStyleSheet("color: #b00020; font-weight: bold;")
-            layout.addWidget(notice_label)
+            notice_label.setWordWrap(True)
+            right.addWidget(notice_label)
 
         learning_section = self._build_learning_section()
         if learning_section is not None:
-            layout.addLayout(learning_section)
+            right.addLayout(learning_section)
 
         doc_type_row = QHBoxLayout()
         doc_type_row.addWidget(QLabel("문서유형 (결과 파일명에 사용됨):"))
@@ -120,7 +168,7 @@ class ReviewWindow(QDialog):
             self.doc_type_combo.setCurrentText(initial_doc_type)
         doc_type_row.addWidget(self.doc_type_combo)
         doc_type_row.addStretch()
-        layout.addLayout(doc_type_row)
+        right.addLayout(doc_type_row)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -150,9 +198,9 @@ class ReviewWindow(QDialog):
 
         inner_layout.addStretch()
         scroll.setWidget(inner)
-        layout.addWidget(scroll)
+        right.addWidget(scroll, stretch=1)
 
-        layout.addLayout(self._build_manual_add_section())
+        right.addLayout(self._build_manual_add_section())
 
         btn_row = QHBoxLayout()
         select_all = QPushButton("전체 선택")
@@ -160,12 +208,116 @@ class ReviewWindow(QDialog):
         deselect_all = QPushButton("전체 해제")
         deselect_all.clicked.connect(lambda: self._set_all(False))
         approve = QPushButton("승인 (마스킹 진행)")
+        approve.setObjectName("approveBtn")
         approve.clicked.connect(self._on_approve)
         btn_row.addWidget(select_all)
         btn_row.addWidget(deselect_all)
         btn_row.addStretch()
         btn_row.addWidget(approve)
-        layout.addLayout(btn_row)
+        right.addLayout(btn_row)
+
+    def _build_preview_panel(self, pdf_path: str | None) -> QVBoxLayout:
+        """실제 PDF 페이지를 렌더링해서 보여주는 미리보기 (문서 내용을 안 보고
+        텍스트 목록만으로 검토하던 문제 보완). 항목별 "보기" 버튼(_jump_to_finding)을
+        누르면 masker.py가 리댁션 위치를 찾을 때 쓰는 것과 같은 page.search_for()로
+        실제 페이지 좌표를 찾아 그 페이지로 이동 + 하이라이트-- 탐지 엔진(detector.py)
+        자체는 여전히 전체 텍스트 오프셋 기준이라 손대지 않고, 미리보기 쪽에서만
+        값을 다시 검색하는 방식."""
+        box = QVBoxLayout()
+        self.preview_label = QLabel("미리보기 없음")
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setMinimumSize(360, 480)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self.preview_label)
+        self.preview_scroll = scroll
+        box.addWidget(scroll, stretch=1)
+
+        nav_row = QHBoxLayout()
+        prev_btn = QPushButton("◀ 이전 페이지")
+        prev_btn.clicked.connect(lambda: self._change_preview_page(-1))
+        self.preview_page_label = QLabel("- / -")
+        self.preview_page_label.setObjectName("pageLabel")
+        self.preview_page_label.setAlignment(Qt.AlignCenter)
+        next_btn = QPushButton("다음 페이지 ▶")
+        next_btn.clicked.connect(lambda: self._change_preview_page(1))
+        nav_row.addWidget(prev_btn)
+        nav_row.addWidget(self.preview_page_label)
+        nav_row.addWidget(next_btn)
+        box.addLayout(nav_row)
+
+        if pdf_path:
+            try:
+                self._preview_doc = fitz.open(pdf_path)
+                self._render_preview_page()
+            except Exception:
+                self.preview_label.setText("미리보기를 불러올 수 없습니다.")
+        return box
+
+    PREVIEW_TARGET_WIDTH = 380  # 패널 폭에 맞춰 페이지가 잘리지 않도록 폭 기준으로 배율 계산
+
+    def _render_preview_page(self, highlight_rect: "fitz.Rect | None" = None):
+        if not self._preview_doc:
+            return
+        page = self._preview_doc[self._preview_page_index]
+        zoom = self.PREVIEW_TARGET_WIDTH / page.rect.width
+        matrix = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=matrix)
+        fmt = QImage.Format_RGB888 if pix.n < 4 else QImage.Format_RGBA8888
+        # .copy(): pix가 소유한 버퍼가 해제된 뒤에도 QImage가 자기 데이터를
+        # 갖고 있도록 함 (안 하면 미리보기가 깨지거나 크래시 위험)
+        image = QImage(pix.samples, pix.width, pix.height, pix.stride, fmt).copy()
+        pixmap = QPixmap.fromImage(image)
+
+        highlight_center = None
+        if highlight_rect is not None:
+            scaled = highlight_rect * matrix
+            painter = QPainter(pixmap)
+            pen = QPen(QColor("#ef4444"))
+            pen.setWidth(3)
+            painter.setPen(pen)
+            painter.drawRect(int(scaled.x0) - 2, int(scaled.y0) - 2, int(scaled.width) + 4, int(scaled.height) + 4)
+            painter.end()
+            highlight_center = (int((scaled.x0 + scaled.x1) / 2), int((scaled.y0 + scaled.y1) / 2))
+
+        self.preview_label.setPixmap(pixmap)
+        self.preview_label.resize(pixmap.size())
+        self.preview_page_label.setText(f"{self._preview_page_index + 1} / {len(self._preview_doc)}")
+
+        if highlight_center is not None:
+            # 하이라이트가 스크롤 영역 밖에 있어도 자동으로 보이는 위치까지 스크롤
+            self.preview_scroll.ensureVisible(highlight_center[0], highlight_center[1], 100, 150)
+
+    def _change_preview_page(self, delta: int):
+        if not self._preview_doc:
+            return
+        new_index = self._preview_page_index + delta
+        if 0 <= new_index < len(self._preview_doc):
+            self._preview_page_index = new_index
+            self._render_preview_page()
+
+    def _jump_to_finding(self, f: Finding):
+        """"보기" 버튼: masker.py가 리댁션할 위치를 찾을 때 쓰는 것과 같은
+        page.search_for()로 이 값이 실제로 어느 페이지 어디에 있는지 찾아
+        그 페이지로 이동하고 하이라이트."""
+        if not self._preview_doc:
+            return
+        for i, page in enumerate(self._preview_doc):
+            rects = page.search_for(f.value)
+            if rects:
+                self._preview_page_index = i
+                self._render_preview_page(highlight_rect=rects[0])
+                return
+        self.preview_page_label.setText(self.preview_page_label.text() + " (미리보기에서 위치를 찾지 못함)")
+
+    def _cleanup_preview_doc(self):
+        if self._preview_doc is not None:
+            self._preview_doc.close()
+            self._preview_doc = None
+
+    def closeEvent(self, event):
+        self._cleanup_preview_doc()
+        super().closeEvent(event)
 
     def _build_learning_section(self) -> QVBoxLayout | None:
         """6.2.1: 검토자 행동이 쌓여 사전에 자동 반영된 최근 항목을 조용히
@@ -312,9 +464,15 @@ class ReviewWindow(QDialog):
         marker = "[수동]" if f.source == "수동" else ""
         if (f.start, f.end) in self.highlight_spans:
             marker = "⚠[미제거]" + marker
+        row = QHBoxLayout()
         cb = QCheckBox(f"{marker}[{f.type}] {f.value}")
         cb.setChecked(f.approved)
-        layout.addWidget(cb)
+        row.addWidget(cb, stretch=1)
+        view_btn = QPushButton("보기")
+        view_btn.setMaximumWidth(56)
+        view_btn.clicked.connect(lambda _checked=False, ff=f: self._jump_to_finding(ff))
+        row.addWidget(view_btn)
+        layout.addLayout(row)
         self.checkboxes.append((cb, f))
 
     def _set_all(self, checked: bool):
@@ -341,6 +499,7 @@ def run_review(
     retry_notice: str | None = None,
     highlight_spans: set[tuple[int, int]] | None = None,
     initial_doc_type: str | None = None,
+    pdf_path: str | None = None,
 ) -> tuple[list[Finding], str] | None:
     """검토 화면을 띄우고, 승인되면 (승인/수동추가 반영된 findings, 문서유형)을,
     취소/닫힘이면 None을 반환.
@@ -349,12 +508,13 @@ def run_review(
     retry_notice / highlight_spans: 자체 재검증 실패 후 검토 화면으로 복귀할 때
     (6.5.1) 사용 -- 실제 값은 보여주지 않고 문구 + 항목 표시로만 안내 (6.5.3).
     initial_doc_type: 재시도 시 이전에 고른 문서유형을 이어받기 위한 값.
+    pdf_path: 왼쪽 미리보기 패널에 실제 페이지를 렌더링하기 위한 원본 PDF 경로.
     _auto_approve_after_ms: 실사용에서는 쓰지 않음. 화면이 없는 환경(headless)에서
     통합 테스트할 때만 사용 — 지정한 시간 뒤 자동으로 승인 버튼을 누른 것처럼 동작.
     """
     app = QApplication.instance() or QApplication([])
     window = ReviewWindow(
-        filename, findings, full_text, retry_notice, highlight_spans, initial_doc_type,
+        filename, findings, full_text, retry_notice, highlight_spans, initial_doc_type, pdf_path,
     )
     if _auto_approve_after_ms is not None:
         from PySide6.QtCore import QTimer
@@ -363,6 +523,7 @@ def run_review(
     # 6.2.1: 이 세션 중 사전에 반영/취소된 게 있으면, 같은 프로세스에서 이어지는
     # 다음 파일(배치 처리) 탐지부터 바로 적용되도록 다시 읽어들임
     reload_dictionaries()
+    window._cleanup_preview_doc()  # exec() 종료가 항상 closeEvent를 부르진 않아 명시적으로 정리
     if window.approved_result:
         return window.findings, window.doc_type
     return None

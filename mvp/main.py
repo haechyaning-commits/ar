@@ -67,7 +67,7 @@ def process_file(input_path: str, output_path: str | None = None,
         reviewed = run_review(
             src.name, findings, full_text, _auto_approve_after_ms,
             retry_notice=retry_notice, highlight_spans=highlight_spans,
-            initial_doc_type=last_doc_type,
+            initial_doc_type=last_doc_type, pdf_path=input_path,
         )
         if reviewed is None:
             print(f"[{src.name}] 검토가 취소되었습니다. 처리하지 않음.")

@@ -30,6 +30,7 @@ class SpanRef:
     fontsize: float
     start: int   # full_text 안에서 이 스팬 텍스트가 시작하는 전역 offset
     end: int     # start + len(text)
+    direction: tuple[float, float] = (1.0, 0.0)  # 텍스트 진행 방향 벡터 (line["dir"]) -- 회전 텍스트 처리용
 
 
 @dataclass
@@ -40,6 +41,15 @@ class RectPlan:
     fontsize: float
     seg_lo: int  # 요청한 (start, end) 안에서 이 조각이 시작하는 상대 위치
     seg_hi: int  # 요청한 (start, end) 안에서 이 조각이 끝나는 상대 위치
+    rotate: int = 0  # insert_text()에 그대로 넘길 회전값 (0/90/180/270)
+
+
+def _dir_to_rotate(dx: float, dy: float) -> int:
+    """텍스트 진행 방향 벡터(line["dir"])를 insert_text()의 rotate 값으로 변환.
+    실측 확인: rotate=0->dir=(1,0), 90->(0,-1), 180->(-1,0), 270->(0,1)."""
+    if abs(dx) >= abs(dy):
+        return 0 if dx >= 0 else 180
+    return 270 if dy > 0 else 90
 
 
 def extract_text_and_spans(doc: fitz.Document) -> tuple[str, list[SpanRef]]:
@@ -57,6 +67,7 @@ def extract_text_and_spans(doc: fitz.Document) -> tuple[str, list[SpanRef]]:
         page_dict = page.get_text("dict", sort=True)
         for block in page_dict.get("blocks", []):
             for line in block.get("lines", []):
+                direction = tuple(line.get("dir", (1.0, 0.0)))
                 for span in line.get("spans", []):
                     text = span.get("text", "")
                     if not text:
@@ -71,6 +82,7 @@ def extract_text_and_spans(doc: fitz.Document) -> tuple[str, list[SpanRef]]:
                         fontsize=span.get("size", 11),
                         start=start,
                         end=offset,
+                        direction=direction,
                     ))
                 emit("\n")  # 같은 줄 안의 탐지 규칙(라벨:값 등)이 다음 줄로 안 새도록 줄마다 구분
         emit("\n")  # 페이지 구분
@@ -98,6 +110,11 @@ def rects_for_range(full_text: str, spans: list[SpanRef], start: int, end: int) 
     페이지 이미지 위에 오버레이로 보여줄 때)이 공유하는 좌표 계산 로직 -- 두 곳이
     각자 따로 계산하면 나중에 어긋날 수 있어 한 곳으로 모음.
 
+    ⚠ 회전된(세로쓰기 등) 텍스트도 진행 방향 벡터(span.direction)를 따라 폭을
+    투영해서 계산한다. 항상 가로 진행(dir=(1,0))을 가정하면 회전된 스팬에서는
+    baseline/사각형이 엉뚱한 좌표로 계산된다 (실측으로 확인, mvp/tests/test_masker.py
+    회귀 테스트로 고정해 둠).
+
     호출하는 쪽에서 미리 full_text[start:end]가 기대하는 값과 같은지 확인하는 걸
     전제로 함 (이 함수 자체는 그 검증을 하지 않음).
     """
@@ -108,12 +125,22 @@ def rects_for_range(full_text: str, spans: list[SpanRef], start: int, end: int) 
         seg_lo = max(start, span.start) - start
         seg_hi = min(end, span.end) - start
 
+        dx, dy = span.direction
+        rotate = _dir_to_rotate(dx, dy)
         prefix_width = fitz.get_text_length(span.text[:local_lo], fontname="korea", fontsize=span.fontsize)
         seg_width = fitz.get_text_length(span.text[local_lo:local_hi], fontname="korea", fontsize=span.fontsize)
         ox, oy = span.origin
-        rect = (ox + prefix_width, span.bbox[1], ox + prefix_width + seg_width, span.bbox[3])
-        baseline = (ox + prefix_width, oy)
-        out.append(RectPlan(span.page_index, rect, baseline, span.fontsize, seg_lo, seg_hi))
+        baseline = (ox + prefix_width * dx, oy + prefix_width * dy)
+        end_x = baseline[0] + seg_width * dx
+        end_y = baseline[1] + seg_width * dy
+        bx0, by0, bx1, by1 = span.bbox
+        if rotate in (0, 180):
+            x0, x1 = sorted((baseline[0], end_x))
+            rect = (x0, by0, x1, by1)
+        else:
+            y0, y1 = sorted((baseline[1], end_y))
+            rect = (bx0, y0, bx1, y1)
+        out.append(RectPlan(span.page_index, rect, baseline, span.fontsize, seg_lo, seg_hi, rotate))
     return out
 
 

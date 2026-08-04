@@ -15,6 +15,7 @@ echo "=== masker ==="; python3 test_masker.py
 echo "=== pipeline ==="; python3 test_pipeline.py
 echo "=== review_ui (클릭) ==="; $RUN_UI test_review_ui_click.py
 echo "=== template_fingerprint ==="; python3 test_template_fingerprint.py
+echo "=== compare_view (클릭) ==="; $RUN_UI test_compare_view.py
 echo "=== end-to-end (클릭) ==="; $RUN_UI test_end_to_end_click.py
 
 echo

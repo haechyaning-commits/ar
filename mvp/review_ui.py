@@ -41,6 +41,13 @@
   `retry_notice`/`highlight_spans`를 넘기면, 안내 문구와 함께 안 지워진 항목에
   "⚠[미제거]" 표시를 붙여 검토자가 바로 찾아 재확인할 수 있게 함(8번 리스크의
   "실패 후 후속 흐름" 요구사항)
+- 원본-마스킹본 미리보기 비교(6.3.2 ①): "원본-마스킹본 미리보기 비교" 버튼을
+  누르면 모덜리스(non-modal) 창이 뜸 -- 왼쪽은 원본 페이지 그대로, 오른쪽은
+  지금 체크된 항목들을 화면에만 검은 사각형으로 그려 마스킹되면 어떻게 보일지
+  시뮬레이션(`compare_view.PreviewCompareDialog`, 실제 파일은 손대지 않음).
+  모덜리스라 검토 화면에서 체크박스를 계속 조작할 수 있고, 토글할 때마다
+  이 화면이 열려있으면 실시간으로 다시 그림. 6.3.2 ②(승인 후 원본_보관/ 결과물
+  비교)는 처리 성공 직후 main.py가 물어보는 방식으로 연결(`compare_view.open_result_comparison`)
 - 문서 템플릿 지문 인식(6.2.2): main.py가 detect_all() 결과에 저장된 템플릿
   지문 기반 후보(`template_fingerprint.suggest_candidates`)를 미리 합쳐서
   넘겨주므로, 이 화면 입장에서는 그룹 "템플릿후보" 태그만 붙여 구분해서 보여줌.
@@ -63,6 +70,7 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
+import compare_view
 import dictionary_learning
 import template_fingerprint
 from detector import CONFIDENCE_LEVELS, Finding, find_occurrences, reload_dictionaries
@@ -96,6 +104,7 @@ class ReviewWindow(QDialog):
         self.page_reviewed: dict[int, bool] = {}  # 스크롤로 실제 화면에 보인 적 있는 페이지
         self.approved_result: bool | None = None  # None=닫힘/취소, True=승인
         self.doc_type: str = DOCUMENT_TYPES[0]
+        self._preview_dialog: compare_view.PreviewCompareDialog | None = None  # 6.3.2 ①
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
@@ -166,6 +175,9 @@ class ReviewWindow(QDialog):
             manual_add = QPushButton("직접 추가 (드래그·클릭·텍스트)")
             manual_add.clicked.connect(self._open_manual_add)
             btn_row.addWidget(manual_add)
+            preview_compare = QPushButton("원본-마스킹본 미리보기 비교")
+            preview_compare.clicked.connect(self._open_preview_compare)
+            btn_row.addWidget(preview_compare)
         approve = QPushButton("승인 (마스킹 진행)")
         approve.clicked.connect(self._on_approve)
         btn_row.addStretch()
@@ -176,6 +188,13 @@ class ReviewWindow(QDialog):
         super().showEvent(event)
         # 창이 실제로 화면에 뜨는(=레이아웃이 최종 크기로 확정된) 시점에 첫 검사
         self._check_visible_rows()
+
+    def closeEvent(self, event):
+        # 6.3.2 ①: 검토 화면이 닫히는데 모덜리스 미리보기 비교 창이 열려있으면
+        # 같이 닫아서(fitz.Document를 계속 열어둔 채) 남지 않게 함
+        if self._preview_dialog is not None:
+            self._preview_dialog.close()
+        super().closeEvent(event)
 
     # -- 6.3.4 페이지 단위 진행 상태 표시 ------------------------------------
     def _build_progress_bar(self) -> QHBoxLayout:
@@ -265,6 +284,7 @@ class ReviewWindow(QDialog):
         cb.setChecked(f.approved)
         cb.setContextMenuPolicy(Qt.CustomContextMenu)
         cb.customContextMenuRequested.connect(lambda pos, box=cb, finding=f: self._show_context_menu(box, finding, pos))
+        cb.toggled.connect(self._on_checkbox_toggled)  # 6.3.2 ①: 열려있는 미리보기 비교 창을 실시간 갱신
         return cb
 
     def _add_row(self, f: Finding):
@@ -348,6 +368,32 @@ class ReviewWindow(QDialog):
                 if dictionary_learning.record_candidate(f.value[0], "이름후보"):
                     reload_dictionaries()
                     self.status_label.setText(f"[사전 자동학습] '{f.value[0]}' 성씨 후보로 반영했습니다.")
+
+    # -- 6.3.2 ① 승인 전 원본-마스킹본 미리보기 비교 -------------------------
+    def _is_checked(self, f: Finding) -> bool:
+        for cb, ff in self.checkboxes:
+            if ff is f:
+                return cb.isChecked()
+        return f.approved
+
+    def _on_checkbox_toggled(self, _checked: bool):
+        if self._preview_dialog is not None:
+            self._preview_dialog.refresh()
+
+    def _open_preview_compare(self):
+        if self._preview_dialog is not None:
+            # 이미 열려있으면 새로 만들지 않고 앞으로 가져오기만 함
+            self._preview_dialog.raise_()
+            self._preview_dialog.activateWindow()
+            return
+        start_page = next((p for p, seen in sorted(self.page_reviewed.items()) if not seen), 0)
+        dlg = compare_view.PreviewCompareDialog(
+            self.filename, self.input_path, self.full_text, self.spans,
+            self.findings, self._is_checked, start_page,
+        )
+        dlg.finished.connect(lambda _result: setattr(self, "_preview_dialog", None))
+        self._preview_dialog = dlg
+        dlg.show()
 
     def _on_approve(self):
         self._check_visible_rows()  # 마지막으로 화면에 있는 상태를 승인 직전 한 번 더 반영

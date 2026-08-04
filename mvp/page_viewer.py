@@ -32,7 +32,9 @@ TYPE_OPTIONS = ["이름", "전화번호", "이메일", "계좌번호", "주민�
 DEFAULT_TYPE = "기타"
 
 
-def _page_pixmap(page: fitz.Page) -> QPixmap:
+def render_page_pixmap(page: fitz.Page) -> QPixmap:
+    """PDF 페이지를 화면 표시용 QPixmap으로 렌더링. compare_view.py(6.3.2)도
+    같은 RENDER_SCALE로 그려야 좌표 변환이 어긋나지 않으므로 여기서 공유."""
     pix = page.get_pixmap(matrix=fitz.Matrix(RENDER_SCALE, RENDER_SCALE))
     img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888)
     return QPixmap.fromImage(img.copy())  # copy() -- pix가 사라진 뒤에도 데이터 유지
@@ -166,7 +168,7 @@ class PageViewerDialog(QDialog):
 
     def _render_page(self):
         page = self.doc[self.page_index]
-        pixmap = _page_pixmap(page)
+        pixmap = render_page_pixmap(page)
 
         existing_rects_px = []
         for f in self.findings:

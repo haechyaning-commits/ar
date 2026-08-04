@@ -73,9 +73,12 @@ def test_end_to_end_via_real_clicks():
     # 응답할 사람이 없어 그대로 두면 멈춘다 -- 테스트 전용 훅으로 자동 응답.
     # _auto_reprocess_confirm: 이번 실행은 새 파일이라 재실행 확인창 자체가 뜨지
     # 않지만, 다른 테스트가 이 워크스페이스를 재사용하게 되는 경우를 대비해 방어적으로 지정.
+    # _auto_open_comparison: 6.3.2 ② 비교 뷰를 열지 물어보는 QMessageBox도 같은 이유로
+    # 헤드리스에서는 자동 응답 필요 -- False로 지정해 이 테스트에서는 열지 않음.
     rc = main_module.process_file(str(src), str(workspace),
                                    _auto_processor_name="테스트담당자",
-                                   _auto_reprocess_confirm=True)
+                                   _auto_reprocess_confirm=True,
+                                   _auto_open_comparison=False)
 
     check("반환 코드 0(성공)", rc == 0, str(rc))
 

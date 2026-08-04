@@ -41,6 +41,12 @@
   `retry_notice`/`highlight_spans`를 넘기면, 안내 문구와 함께 안 지워진 항목에
   "⚠[미제거]" 표시를 붙여 검토자가 바로 찾아 재확인할 수 있게 함(8번 리스크의
   "실패 후 후속 흐름" 요구사항)
+- 문서 템플릿 지문 인식(6.2.2): main.py가 detect_all() 결과에 저장된 템플릿
+  지문 기반 후보(`template_fingerprint.suggest_candidates`)를 미리 합쳐서
+  넘겨주므로, 이 화면 입장에서는 그룹 "템플릿후보" 태그만 붙여 구분해서 보여줌.
+  승인 시점(`_on_approve`)에 그때 승인된 항목 위치를 다시 지문으로 조용히
+  기록(`template_fingerprint.record_template`) -- 사전 자동학습(6.2.1)과 같은
+  결로, 검토자가 이미 하는 승인 행동만으로 조용히 축적되고 별도 확인을 묻지 않음
 - "승인" 버튼을 눌러야 다음 단계(마스킹)로 넘어감
 
 MVP 범위: 사이드바 항목 점프, 단축키, 실행취소(Undo) 등은 향후 확장으로 남겨두고
@@ -58,6 +64,7 @@ from PySide6.QtWidgets import (
 )
 
 import dictionary_learning
+import template_fingerprint
 from detector import CONFIDENCE_LEVELS, Finding, find_occurrences, reload_dictionaries
 from output import DOCUMENT_TYPES
 from page_viewer import PageViewerDialog
@@ -69,6 +76,7 @@ class ReviewWindow(QDialog):
         self, filename: str, findings: list[Finding], full_text: str = "",
         spans: list[SpanRef] | None = None, total_pages: int = 1, input_path: str = "",
         retry_notice: str | None = None, highlight_spans: set[tuple[int, int]] | None = None,
+        page_sizes: list[tuple[float, float]] | None = None,
     ):
         super().__init__()
         self.setWindowTitle(f"검토 - {filename}")
@@ -80,6 +88,7 @@ class ReviewWindow(QDialog):
         self.total_pages = max(total_pages, 1)
         self.input_path = input_path
         self.highlight_spans = highlight_spans or set()
+        self.page_sizes = page_sizes or []
         self.checkboxes: list[tuple[QCheckBox, Finding]] = []
         self.finding_page: dict[int, int] = {}  # id(finding) -> page_index
         self.page_buttons: dict[int, QPushButton] = {}
@@ -247,6 +256,8 @@ class ReviewWindow(QDialog):
             tags.append("동일 값 일괄 추가")
         if f.group == "수동추가":
             tags.append("6.3.1 수동 추가")
+        if f.group == "템플릿후보":
+            tags.append("6.2.2 템플릿 지문 후보")
         if f.cross_validated:
             tags.append("6.2.3 교차검증 반영")
         marker = "⚠[미제거] " if (f.start, f.end) in self.highlight_spans else ""
@@ -357,6 +368,11 @@ class ReviewWindow(QDialog):
                 if dictionary_learning.record_candidate(f.value, "제외"):
                     reload_dictionaries()
         self.doc_type = self.doc_type_combo.currentText()
+        # 6.2.2: 승인된(=실제로 마스킹될) 항목 위치를 이 문서의 템플릿 지문으로 조용히
+        # 축적 -- 마스킹/저장이 이후 단계에서 실패하더라도, 검토자가 이 위치를
+        # 확정했다는 사실 자체가 지문으로서는 유효한 신호이므로 여기서 기록
+        approved = [f for f in self.findings if f.approved]
+        template_fingerprint.record_template(self.full_text, self.spans, self.page_sizes, approved)
         self.approved_result = True
         self.accept()
 
@@ -372,6 +388,7 @@ def run_review(
     spans: list[SpanRef] | None = None, total_pages: int = 1, input_path: str = "",
     _auto_approve_after_ms: int | None = None,
     retry_notice: str | None = None, highlight_spans: set[tuple[int, int]] | None = None,
+    page_sizes: list[tuple[float, float]] | None = None,
 ) -> ReviewResult | None:
     """검토 화면을 띄우고, 승인되면 approved 플래그가 반영된 findings와 선택한
     문서 유형을 ReviewResult로, 취소/닫힘이면 None을 반환.
@@ -386,10 +403,12 @@ def run_review(
     승인 버튼을 누른 것처럼 동작(6.3.4 도입 후에도 자동 테스트가 막히지 않도록).
     retry_notice/highlight_spans: 자체 재검증 실패 후 이 화면으로 복귀할 때
     main.py가 넘겨주는 안내 문구와 "안 지워진" 항목의 (start, end) 위치.
+    page_sizes: 6.2.2 템플릿 지문 기록에 필요한 페이지별 (width, height).
+    비어 있으면(테스트 등) 지문 기록은 조용히 건너뜀.
     """
     app = QApplication.instance() or QApplication([])
     window = ReviewWindow(filename, findings, full_text, spans, total_pages, input_path,
-                           retry_notice, highlight_spans)
+                           retry_notice, highlight_spans, page_sizes)
     if _auto_approve_after_ms is not None:
         from PySide6.QtCore import QTimer
 

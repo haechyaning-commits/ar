@@ -22,8 +22,9 @@ from pathlib import Path
 import fitz  # PyMuPDF
 from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox
 
+import template_fingerprint
 from detector import detect_all
-from pdf_extract import extract_text_and_spans
+from pdf_extract import extract_text_and_spans, page_sizes
 from pipeline import process_atomic
 from review_ui import run_review
 import output
@@ -72,10 +73,15 @@ def process_file(input_path: str, workspace_dir: str | None = None,
     # masker.py도 같은 방식(pdf_extract)으로 다시 추출해 findings의 start/end를
     # 실제 좌표로 되찾으므로, 탐지 쪽도 반드시 이 함수를 써야 오프셋이 어긋나지 않음
     full_text, spans = extract_text_and_spans(doc)
+    sizes = page_sizes(doc)
     total_pages = doc.page_count
     doc.close()
 
     findings = detect_all(full_text)
+    # 6.2.2: 저장된 템플릿 지문 중 이 문서와 양식이 일치하는 게 있으면, 탐지
+    # 엔진이 이번엔 놓친 위치를 우선 확인 후보로 추가 (탐지가 0건이어도 템플릿
+    # 지문만으로 후보가 나올 수 있음 -- 그래서 detect_all 결과와 무관하게 항상 시도)
+    findings += template_fingerprint.suggest_candidates(full_text, spans, sizes, findings)
     if not findings:
         print(f"[{src.name}] 탐지된 개인정보가 없습니다.")
         return 1
@@ -100,7 +106,8 @@ def process_file(input_path: str, workspace_dir: str | None = None,
     while True:
         reviewed = run_review(src.name, findings, full_text, spans, total_pages, str(src),
                                _auto_approve_after_ms=_auto_approve_after_ms,
-                               retry_notice=retry_notice, highlight_spans=highlight_spans)
+                               retry_notice=retry_notice, highlight_spans=highlight_spans,
+                               page_sizes=sizes)
         if reviewed is None:
             print(f"[{src.name}] 검토가 취소되었습니다. 처리하지 않음.")
             return 2

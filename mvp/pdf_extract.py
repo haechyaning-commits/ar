@@ -52,6 +52,12 @@ def _dir_to_rotate(dx: float, dy: float) -> int:
     return 270 if dy > 0 else 90
 
 
+def page_sizes(doc: fitz.Document) -> list[tuple[float, float]]:
+    """각 페이지의 (width, height). 6.2.2 템플릿 지문 인식이 좌표를 페이지
+    크기 기준 상대값으로 정규화하는 데 씀 -- doc이 닫히기 전에 호출해야 함."""
+    return [(page.rect.width, page.rect.height) for page in doc]
+
+
 def extract_text_and_spans(doc: fitz.Document) -> tuple[str, list[SpanRef]]:
     parts: list[str] = []
     spans: list[SpanRef] = []

@@ -20,10 +20,13 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton
 
 import dictionary_learning
+import template_fingerprint
 import main as main_module
 
 # 6.2.1 사전 자동학습이 실제 mvp/data/ 사전을 반복 테스트로 오염시키지 않도록 격리
 dictionary_learning.DEFAULT_DATA_DIR = Path(tempfile.mkdtemp(prefix="dict_learning_test_"))
+# 6.2.2 템플릿 지문도 마찬가지로 실제 mvp/data/template_fingerprints.json을 건드리지 않도록 격리
+template_fingerprint.DEFAULT_DATA_DIR = Path(tempfile.mkdtemp(prefix="template_fp_test_"))
 
 _FAILURES: list[str] = []
 

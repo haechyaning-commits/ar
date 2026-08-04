@@ -32,10 +32,12 @@ TYPE_OPTIONS = ["이름", "전화번호", "이메일", "계좌번호", "주민�
 DEFAULT_TYPE = "기타"
 
 
-def render_page_pixmap(page: fitz.Page) -> QPixmap:
+def render_page_pixmap(page: fitz.Page, scale: float = RENDER_SCALE) -> QPixmap:
     """PDF 페이지를 화면 표시용 QPixmap으로 렌더링. compare_view.py(6.3.2)도
-    같은 RENDER_SCALE로 그려야 좌표 변환이 어긋나지 않으므로 여기서 공유."""
-    pix = page.get_pixmap(matrix=fitz.Matrix(RENDER_SCALE, RENDER_SCALE))
+    같은 RENDER_SCALE로 그려야 좌표 변환이 어긋나지 않으므로 여기서 공유.
+    scale(신규): review_ui.py의 검토창 내장 캔버스 확대/축소 기능이 RENDER_SCALE
+    배수로 다른 배율을 요청할 때 씀 -- 생략하면 기존과 동일하게 RENDER_SCALE."""
+    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
     img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888)
     return QPixmap.fromImage(img.copy())  # copy() -- pix가 사라진 뒤에도 데이터 유지
 

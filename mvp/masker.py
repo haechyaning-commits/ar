@@ -128,6 +128,29 @@ def mask_card(value: str) -> str:
     return _mask_partial_keep_first_and_last(value, keep_first=4, keep_last=4)
 
 
+# 9번 표 정책 확정 (v27): 주민등록번호 완전마스킹 여부가 미확인 상태였던 걸,
+# "실무에서 통용되는 표기 관행" 기준으로 부분마스킹으로 확정함 -- 앞 6자리
+# (생년월일)는 노출하고, 뒤 7자리(성별·출생지역코드·개인고유일련번호·검증숫자)만
+# 전부 마스킹. 뒤 7자리가 다른 정보와 결합했을 때 개인을 완전히 특정할 수 있는
+# 진짜 민감한 부분이고, 앞 6자리(생년월일)는 상대적으로 덜 민감해 이 정도만
+# 가리는 게 실무 관행으로 널리 쓰임. 계좌/카드번호와 같은 이유로 하드코딩하지
+# 않고 상수 하나로 원복(완전마스킹) 가능하게 둠. ⚠ 여권번호는 이런 뚜렷한 통용
+# 관행이 없어 그대로 완전마스킹 유지(범위 밖).
+RRN_MASK_FULL = False  # 정책 확정: 부분마스킹(앞 6자리 노출)이 기본값 / True=완전마스킹으로 원복
+_RRN_STRUCTURE_RE = re.compile(r"^(\d{6})(-?)(\d{7})$")
+
+
+def mask_rrn(value: str) -> str:
+    """주민등록번호: 앞 6자리(생년월일)는 노출, 뒤 7자리는 전부 마스킹."""
+    if RRN_MASK_FULL:
+        return mask_full(value)
+    m = _RRN_STRUCTURE_RE.match(value)
+    if not m:
+        return mask_full(value)  # 형식이 예상과 다르면 안전하게 완전마스킹으로 폴백
+    front, sep, back = m.groups()
+    return f"{front}{sep}{'*' * len(back)}"
+
+
 def mask_value(f: Finding) -> str:
     if f.type == "이름":
         return mask_name(f.value)
@@ -141,7 +164,9 @@ def mask_value(f: Finding) -> str:
         return mask_account(f.value)
     if f.type == "카드번호":
         return mask_card(f.value)
-    if f.type in ("주민등록번호", "여권번호"):
+    if f.type == "주민등록번호":
+        return mask_rrn(f.value)
+    if f.type == "여권번호":
         return mask_full(f.value)
     return "*" * len(f.value)
 

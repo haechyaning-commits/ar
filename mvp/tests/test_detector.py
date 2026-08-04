@@ -117,6 +117,21 @@ def test_compound_surname():
     check("복성(남궁)도 이름으로 탐지됨", result == ["남궁민지"], str(result))
 
 
+def test_surname_dictionary_confirmed_source_coverage():
+    """9번 표 정책 확정(v27): 성씨 사전 출처를 통계청 2015년 인구주택총조사
+    성씨·본관 조사(공공데이터포털/SGIS 공개자료)로 확정하고, 그 기준 인구
+    상위 100위 안에 있었으나 기존 목록에 빠져 있던 성씨를 추가함(류/나/탁/
+    국/어/은/편). 실제로 사전에 반영돼 탐지되는지 확인."""
+    print("test_surname_dictionary_confirmed_source_coverage")
+    for surname, given_name in [
+        ("류", "지훈"), ("나", "현우"), ("탁", "민수"),
+        ("국", "은비"), ("어", "진영"), ("은", "성민"), ("편", "가은"),
+    ]:
+        result = types_at(f"성명: {surname}{given_name}", "이름")
+        check(f"census 추가 성씨 '{surname}'로 시작하는 이름이 탐지됨",
+              result == [f"{surname}{given_name}"], str(result))
+
+
 def test_business_title_pattern_no_space_before_title():
     print("test_business_title_pattern_no_space_before_title")
     findings = detect_all("감사팀장 홍길동 배석")
@@ -152,6 +167,7 @@ def main():
         test_phone_shaped_account_number_gets_mislabeled_as_phone,
         test_name_exclude_words_prevent_false_positive,
         test_compound_surname,
+        test_surname_dictionary_confirmed_source_coverage,
         test_business_title_pattern_no_space_before_title,
         test_address_region_alone_not_flagged,
         test_duplicate_name_occurrences_both_flagged,

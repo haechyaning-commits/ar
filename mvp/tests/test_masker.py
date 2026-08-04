@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import fitz
 
 from detector import detect_all
-from masker import mask_account, mask_card, mask_pdf, has_rotated_text, has_hidden_content
+from masker import mask_account, mask_card, mask_pdf, mask_rrn, has_rotated_text, has_hidden_content
 from pdf_extract import extract_text_and_spans
 
 _FAILURES: list[str] = []
@@ -130,7 +130,8 @@ def test_rotated_text_masked_correctly_no_duplicate():
           len(mask_lines) == 1, f"{len(mask_lines)}개: {mask_lines}")
     if mask_lines:
         text, direction = mask_lines[0]
-        check("마스킹된 값이 완전마스킹 형태로 들어감", text == "주민등록번호: ******-*******", text)
+        check("마스킹된 값이 확정된 부분마스킹 형태로 들어감(앞 6자리 생년월일 노출, 뒤 7자리 마스킹, v27 정책)",
+              text == "주민등록번호: 900101-*******", text)
         check("대체 텍스트가 원본과 같은 회전 방향(세로, dir=(0,-1))으로 삽입됨",
               direction is not None and abs(direction[0]) < 0.01 and direction[1] < 0, str(direction))
 
@@ -192,8 +193,8 @@ def test_hidden_embedded_file_gets_scrubbed():
     has_embed = masked_doc.embfile_count() > 0
     content = masked_doc.embfile_get(0).decode("utf-8") if has_embed else ""
     masked_doc.close()
-    check("첨부파일이 삭제되지 않고 그대로 유지되되 내용만 마스킹됨",
-          has_embed and content == "주민번호: ******-*******", content)
+    check("첨부파일이 삭제되지 않고 그대로 유지되되 내용만 마스킹됨(v27 부분마스킹 정책)",
+          has_embed and content == "주민번호: 900101-*******", content)
 
 
 def test_hidden_widget_gets_scrubbed_and_passes():
@@ -320,6 +321,50 @@ def test_account_card_masking_end_to_end_via_mask_pdf():
     check("카드번호 가운데(5678-9012)는 사라짐", "5678" not in text and "9012-3456" not in text, text)
 
 
+def test_rrn_masking_policy_confirmed():
+    """9번 표(확인 필요한 가정) 정책 확정(v27): 주민등록번호 완전마스킹을 "실무에서
+    통용되는 표기 관행" 기준 부분마스킹으로 확정 -- 앞 6자리(생년월일)는 노출,
+    뒤 7자리(성별/지역코드/일련번호/검증숫자)는 전부 마스킹."""
+    print("test_rrn_masking_policy_confirmed")
+
+    rrn = "900101-1234568"  # 체크섬 유효 (test_detector.py와 동일 값)
+    masked = mask_rrn(rrn)
+    check("원본과 길이가 같음(자체재검증 전제 조건)", len(masked) == len(rrn), masked)
+    check("앞 6자리(생년월일 900101)는 그대로 보임", masked.startswith("900101"), masked)
+    check("뒤 7자리는 전부 마스킹됨", masked == "900101-*******", masked)
+
+    # 형식이 예상과 다른 값(방어적 폴백) -- 완전마스킹으로 안전하게 처리돼야 함
+    odd = "12345-123456"  # 6-7 구조가 아님
+    check("예상 밖 형식은 완전마스킹으로 폴백(부분적으로 어설프게 새는 것보다 안전)",
+          mask_rrn(odd) == "*" * 5 + "-" + "*" * 6, mask_rrn(odd))
+
+
+def test_rrn_masking_end_to_end_via_mask_pdf():
+    """확정된 주민등록번호 부분마스킹 정책이 실제 PDF 리댁션 파이프라인에도
+    그대로 반영되는지 확인."""
+    print("test_rrn_masking_end_to_end_via_mask_pdf")
+    tmp = _new_tmp()
+    src = tmp / "주민번호.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "주민등록번호: 900101-1234568", fontsize=11, fontname="korea")
+    doc.save(src)
+    doc.close()
+
+    out = tmp / "주민번호_masked.pdf"
+    findings, result = _mask(src, out)
+    check("자체 재검증 통과", result.success, str(result.leftover))
+    check("주민등록번호가 실제로 탐지됨", any(f.type == "주민등록번호" for f in findings), str(findings))
+
+    masked_doc = fitz.open(out)
+    text = masked_doc[0].get_text(sort=True)
+    masked_doc.close()
+    check("생년월일(900101)은 결과물에도 보임", "900101" in text, text)
+    check("뒤 7자리(1234568)는 결과물에서 사라짐", "1234568" not in text, text)
+    raw = out.read_bytes()
+    check("바이트 레벨에서도 뒤 7자리가 안 남음(오버레이 아님 재확인)", b"1234568" not in raw)
+
+
 def main():
     tests = [
         test_basic_roundtrip_byte_level_removal,
@@ -331,6 +376,8 @@ def main():
         test_freetext_annotation_orphan_bytes_purged,
         test_account_card_masking_policy_confirmed,
         test_account_card_masking_end_to_end_via_mask_pdf,
+        test_rrn_masking_policy_confirmed,
+        test_rrn_masking_end_to_end_via_mask_pdf,
     ]
     for t in tests:
         t()

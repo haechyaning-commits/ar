@@ -74,10 +74,18 @@ def mask_full(value: str) -> str:
     return "".join("*" if c.isalnum() else c for c in value)
 
 
-# 9번 표(확인 필요한 가정): 계좌/카드번호는 완전마스킹이 잠정 스펙이지만,
-# 조회 가용성을 위해 끝자리를 남기는 부분마스킹으로 바뀔 수 있다고 명시돼 있음
-# -> 하드코딩하지 말고 여기 상수 하나만 바꾸면 정책을 전환할 수 있게 함.
-ACCOUNT_CARD_MASK_FULL = True  # True=완전마스킹(현재 잠정 스펙) / False=끝 4자리 유지
+# 9번 표(확인 필요한 가정) 정책 확정 (v26): 완전마스킹이 잠정 스펙이었던 걸,
+# "대중적으로 통용되는 표기 관행" 기준으로 부분마스킹으로 확정함 -- 조회/대조
+# 가용성을 지키면서도(완전마스킹은 현업이 마스킹을 풀거나 별도 메모를 남기는
+# 2차 위험을 만든다는 게 9번 표의 우려였음) 통용 표기와 다르게 보이지 않게 함.
+# 계좌번호와 카드번호는 실제로 통용되는 표기 관행이 서로 달라 별도 함수로 분리:
+#   - 계좌번호: 끝 4자리만 노출, 나머지 마스킹 -- 국내 은행/금융앱이 계좌번호를
+#     보여줄 때 흔히 쓰는 방식(예: 예금주 확인 화면 등에서 "뒷 4자리"만 노출)
+#   - 카드번호: 앞 4자리 + 뒤 4자리 노출, 가운데 마스킹 -- PCI-DSS의 카드번호
+#     truncation 권고(최대 앞 6자리/뒤 4자리 노출) 및 국내 카드사 영수증·앱에서
+#     흔히 쓰는 표기(예: "1234-****-****-5678")와 같은 방향
+# 하드코딩하지 않고 상수 하나로 원복(완전마스킹) 가능하게는 유지.
+ACCOUNT_CARD_MASK_FULL = False  # 정책 확정: 부분마스킹이 기본값 / True=완전마스킹(구 잠정 스펙)으로 원복
 
 
 def _mask_partial_keep_last(value: str, keep: int = 4) -> str:
@@ -90,10 +98,34 @@ def _mask_partial_keep_last(value: str, keep: int = 4) -> str:
     )
 
 
-def mask_account_or_card(value: str) -> str:
+def _mask_partial_keep_first_and_last(value: str, keep_first: int = 4, keep_last: int = 4) -> str:
+    """앞 keep_first개 + 뒤 keep_last개의 영문/숫자만 남기고 나머지 영문/숫자는
+    마스킹, 구분자는 그대로 유지. 값이 짧아 앞/뒤 구간이 겹치면 자연히 합집합으로
+    처리됨(더 많이 가리는 쪽이 아니라 더 많이 보이는 쪽으로 겹치므로, 아주 짧은
+    값에서는 100% 신뢰하지 말 것 -- 다만 CARD_RE가 항상 16자리 고정이라 실사용
+    범위에서는 문제되지 않음)."""
+    alnum_positions = [i for i, c in enumerate(value) if c.isalnum()]
+    n = len(alnum_positions)
+    keep_positions = set(alnum_positions[:keep_first]) | set(alnum_positions[max(0, n - keep_last):])
+    return "".join(
+        c if (not c.isalnum()) or i in keep_positions else "*"
+        for i, c in enumerate(value)
+    )
+
+
+def mask_account(value: str) -> str:
+    """계좌번호: 끝 4자리만 노출 (국내 은행/금융앱 통용 표기)."""
     if ACCOUNT_CARD_MASK_FULL:
         return mask_full(value)
     return _mask_partial_keep_last(value, keep=4)
+
+
+def mask_card(value: str) -> str:
+    """카드번호: 앞 4자리 + 뒤 4자리 노출, 가운데 마스킹 (PCI-DSS truncation 권고 +
+    국내 카드사 영수증/앱 통용 표기, 예: 1234-****-****-5678)."""
+    if ACCOUNT_CARD_MASK_FULL:
+        return mask_full(value)
+    return _mask_partial_keep_first_and_last(value, keep_first=4, keep_last=4)
 
 
 def mask_value(f: Finding) -> str:
@@ -105,8 +137,10 @@ def mask_value(f: Finding) -> str:
         return mask_email(f.value)
     if f.type == "주소":
         return mask_address(f.value)
-    if f.type in ("계좌번호", "카드번호"):
-        return mask_account_or_card(f.value)
+    if f.type == "계좌번호":
+        return mask_account(f.value)
+    if f.type == "카드번호":
+        return mask_card(f.value)
     if f.type in ("주민등록번호", "여권번호"):
         return mask_full(f.value)
     return "*" * len(f.value)

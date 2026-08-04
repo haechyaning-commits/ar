@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import fitz
 
 from detector import detect_all
-from masker import mask_pdf, has_rotated_text, has_hidden_content
+from masker import mask_account, mask_card, mask_pdf, has_rotated_text, has_hidden_content
 from pdf_extract import extract_text_and_spans
 
 _FAILURES: list[str] = []
@@ -264,6 +264,62 @@ def test_freetext_annotation_orphan_bytes_purged():
           b"abc@test.com" not in raw)
 
 
+def test_account_card_masking_policy_confirmed():
+    """9번 표(확인 필요한 가정) 정책 확정(v26): 완전마스킹 잠정 스펙을 "대중적으로
+    통용되는 표기 관행" 기준 부분마스킹으로 확정. 계좌번호는 끝 4자리만(국내
+    은행/금융앱 통용), 카드번호는 앞4+뒤4(PCI-DSS truncation 권고 + 국내 카드사
+    통용 표기)로 서로 다르게 마스킹됨을 확인."""
+    print("test_account_card_masking_policy_confirmed")
+
+    account = "123456-04-789012"
+    masked_account = mask_account(account)
+    check("계좌번호: 원본과 길이가 같음(자체재검증 전제 조건)",
+          len(masked_account) == len(account), masked_account)
+    check("계좌번호: 끝 4자리(9012)는 그대로 보임", masked_account.endswith("9012"), masked_account)
+    check("계좌번호: 그 외 숫자는 전부 마스킹됨(앞자리도 안 보임)",
+          masked_account == "******-**-**9012", masked_account)
+
+    card = "1234567890123456"
+    masked_card = mask_card(card)
+    check("카드번호: 원본과 길이가 같음(자체재검증 전제 조건)",
+          len(masked_card) == len(card), masked_card)
+    check("카드번호: 앞 4자리(1234)가 그대로 보임", masked_card.startswith("1234"), masked_card)
+    check("카드번호: 뒤 4자리(3456)가 그대로 보임", masked_card.endswith("3456"), masked_card)
+    check("카드번호: 가운데는 마스킹됨(1234********3456)", masked_card == "1234********3456", masked_card)
+
+    check("계좌와 카드가 서로 다른 규칙을 씀(같은 값이면 결과가 달라야 함)",
+          mask_account("1234567890123456") != mask_card("1234567890123456"))
+
+
+def test_account_card_masking_end_to_end_via_mask_pdf():
+    """확정된 부분마스킹 정책이 실제 PDF 리댁션 파이프라인에도 그대로 반영되는지
+    (마스킹 함수 단위 테스트뿐 아니라 mask_pdf 전체 경로로) 확인."""
+    print("test_account_card_masking_end_to_end_via_mask_pdf")
+    tmp = _new_tmp()
+    src = tmp / "계좌카드.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "예금주: 김테스트 계좌: 123456-04-789012", fontsize=11, fontname="korea")
+    page.insert_text((72, 130), "카드번호 1234-5678-9012-3456", fontsize=11, fontname="korea")
+    doc.save(src)
+    doc.close()
+
+    out = tmp / "계좌카드_masked.pdf"
+    findings, result = _mask(src, out)
+    check("자체 재검증 통과", result.success, str(result.leftover))
+    check("계좌번호/카드번호가 실제로 탐지됨",
+          {f.type for f in findings} >= {"계좌번호", "카드번호"}, str(findings))
+
+    masked_doc = fitz.open(out)
+    text = masked_doc[0].get_text(sort=True)
+    masked_doc.close()
+    check("계좌번호 끝 4자리(9012)는 결과물에도 보임", "9012" in text, text)
+    check("계좌번호 앞부분(123456)은 사라짐", "123456" not in text, text)
+    check("카드번호 앞 4자리(1234)는 결과물에도 보임", "1234" in text, text)
+    check("카드번호 뒤 4자리(3456)는 결과물에도 보임", "3456" in text, text)
+    check("카드번호 가운데(5678-9012)는 사라짐", "5678" not in text and "9012-3456" not in text, text)
+
+
 def main():
     tests = [
         test_basic_roundtrip_byte_level_removal,
@@ -273,6 +329,8 @@ def main():
         test_hidden_embedded_file_gets_scrubbed,
         test_hidden_widget_gets_scrubbed_and_passes,
         test_freetext_annotation_orphan_bytes_purged,
+        test_account_card_masking_policy_confirmed,
+        test_account_card_masking_end_to_end_via_mask_pdf,
     ]
     for t in tests:
         t()

@@ -36,7 +36,13 @@
 - 사전 자동 학습(6.2.1): 검토자가 이미 하는 행동(자동탐지 이름 체크 해제 = 제외
   후보, 수동으로 이름 추가 = 성씨 후보)만으로 조용히 후보를 누적(`dictionary_learning`).
   확인 팝업 없이 통보만 하고, 임계값(3회) 도달 시 실제 사전에 반영 + `detector.reload_dictionaries()`로
-  즉시 재적용(배치 처리 중 다음 파일부터 바로 반영되도록)
+  즉시 재적용(배치 처리 중 다음 파일부터 바로 반영되도록). "되돌리기": 창 상단에
+  최근 반영 내역(`dictionary_learning.get_recent_promotions()`)을 항목마다 되돌리기
+  버튼과 함께 보여줌 -- 반영 시점(예: 승인 버튼을 누르는 순간)엔 창이 곧바로
+  닫혀 그 자리에서 되돌리기를 누를 기회가 없으므로, 대신 다음에 뜨는 검토
+  창(배치의 다음 파일 등)마다 매번 다시 보여주는 방식으로 "언제든 되돌릴 수
+  있음"을 보장. 수동 추가로 즉시 반영되는 경우(창이 안 닫힘)는 그 자리에서도
+  바로 갱신해서 보여줌
 - 자체검증 실패 후 재시도: main.py가 self-check 실패로 이 화면을 다시 띄울 때
   `retry_notice`/`highlight_spans`를 넘기면, 안내 문구와 함께 안 지워진 항목에
   "⚠[미제거]" 표시를 붙여 검토자가 바로 찾아 재확인할 수 있게 함(8번 리스크의
@@ -177,6 +183,18 @@ class ReviewWindow(QDialog):
         doc_type_row.addWidget(self.doc_type_combo)
         doc_type_row.addStretch()
         layout.addLayout(doc_type_row)
+
+        # 6.2.1 "되돌리기": 이전 문서(또는 이전 실행)에서 자동 반영된 사전 항목을
+        # 이 창에서 바로 되돌릴 수 있게 함. 반영 시점(예: _on_approve 안에서 "제외"
+        # 후보가 임계값을 넘는 순간)에는 창이 곧바로 닫혀 토스트를 띄워도 보이지
+        # 않으므로, 그 대신 다음에 뜨는 검토 창(배치 처리 중 다음 파일, 또는 다음
+        # 실행)마다 최근 반영 내역을 매번 다시 보여주는 방식으로 "되돌리기 가능"
+        # 요구사항을 만족시킴 -- 언제 반영됐는지와 무관하게 항상 되돌릴 기회가 있음.
+        self.promotions_widget = QWidget()
+        self.promotions_layout = QVBoxLayout(self.promotions_widget)
+        self.promotions_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.promotions_widget)
+        self._refresh_promotions_panel()
 
         for f in findings:
             self.finding_page[id(f)] = page_of(self.spans, f.start)
@@ -404,6 +422,37 @@ class ReviewWindow(QDialog):
     def _on_doc_type_changed(self, text: str):
         self.doc_type = text
 
+    # -- 6.2.1 "되돌리기" -------------------------------------------------
+    def _refresh_promotions_panel(self):
+        while self.promotions_layout.count():
+            item = self.promotions_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        promotions = dictionary_learning.get_recent_promotions()
+        self.promotions_widget.setVisible(bool(promotions))
+        if not promotions:
+            return
+
+        self.promotions_layout.addWidget(QLabel(
+            f"<b>최근 사전 자동학습 반영</b> (최근 {dictionary_learning.RECENT_DAYS}일, 잘못 반영됐으면 되돌릴 수 있습니다)"
+        ))
+        for p in promotions:
+            row = QHBoxLayout()
+            row.addWidget(QLabel(f"[{p.direction}] '{p.word}' — {p.promoted_at[:10]}"))
+            revert_btn = QPushButton("되돌리기")
+            revert_btn.clicked.connect(lambda _checked=False, word=p.word, direction=p.direction:
+                                        self._revert_promotion(word, direction))
+            row.addWidget(revert_btn)
+            row.addStretch()
+            self.promotions_layout.addLayout(row)
+
+    def _revert_promotion(self, word: str, direction: str):
+        dictionary_learning.revert_promotion(word, direction)
+        reload_dictionaries()  # 되돌린 사전이 이 문서의 남은 검토에도 바로 반영되도록
+        self.status_label.setText(f"[사전 자동학습] '{word}' ({direction}) 반영을 되돌렸습니다.")
+        self._refresh_promotions_panel()
+
     def _show_context_menu(self, cb: QCheckBox, f: Finding, pos):
         # 6.3.3: 문서 전체에서 같은 문자열이 몇 곳에 더 있는지 찾아 일괄 선택/해제 제공.
         # full_text가 없으면(테스트 등) 현재 목록에 있는 항목끼리만이라도 동작하게 함.
@@ -458,6 +507,7 @@ class ReviewWindow(QDialog):
                 if dictionary_learning.record_candidate(f.value[0], "이름후보"):
                     reload_dictionaries()
                     self.status_label.setText(f"[사전 자동학습] '{f.value[0]}' 성씨 후보로 반영했습니다.")
+                    self._refresh_promotions_panel()  # 방금 반영된 항목도 되돌리기 목록에 바로 반영
 
     # -- 6.3.2 ① 승인 전 원본-마스킹본 미리보기 비교 -------------------------
     def _is_checked(self, f: Finding) -> bool:

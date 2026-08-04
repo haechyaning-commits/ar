@@ -75,18 +75,35 @@
   정렬 대상) 항목만 순서대로 스크롤+포커스 이동, 정규식으로 확실히 잡히는
   항목(전화번호 등)은 건너뜀
 
+- 검토창 내장 실제 페이지 캔버스 (실사용 피드백 반영, 신규): 그동안은 사이드바
+  체크리스트만 보여줘서, 검토자가 "이게 실제 문서 어디 있는 값인지", "자동
+  탐지가 놓친 게 더 없는지"를 확인하려면 "직접 추가"/"미리보기 비교" 같은
+  별도 창을 열어야 했다 -- 탐지 목록만 바로 보이니 실제 파일과 대조가 안 되고
+  스스로 정확도를 검증할 수 없다는 지적. `input_path`가 있으면(원본을 다시
+  열 수 있으면, 기존 "직접 추가"/"미리보기 비교"와 같은 조건) 검토창을 좌/우
+  분할해 왼쪽에 실제 페이지 이미지를 항상 띄움(`_InlineReviewCanvas`):
+    - 탐지 영역을 승인 여부에 따라 색이 다른 박스로 표시(빨강=마스킹 예정,
+      초록=제외) -- 사이드바 체크박스와 항상 양방향으로 동기화(어느 쪽에서
+      토글해도 반대쪽에 바로 반영)
+    - 박스가 없는 자리(자동탐지가 놓친 텍스트)를 클릭/드래그하면 6.3.1과 같은
+      방식(`pdf_extract.resolve_word_at`/`resolve_region`)으로 즉시 새 항목
+      추가 -- "탐지가 덜 된 것 같다"를 실제 페이지 위에서 바로 해결
+    - 진행바 페이지 버튼과 페이지 전환이 연동되어 캔버스도 같이 넘어감
+  기존 Qt 기본 회색 룩도 카드형 행 + 색 대비 + 버튼 스타일(`REVIEW_STYLESHEET`)
+  로 정리 -- 큰 구조 변경 없이 스캔하기 쉽게만 다듬음.
+
 MVP 범위: 실행취소(Undo) 등은 향후 확장으로 남겨두고 "전체승인 + 예외 해제" +
 "저신뢰 우선 정렬" + "동일 값 일괄 처리" + "페이지 단위 진행 상태 표시" +
 "수동 추가" + "문서 유형 선택" + "미리보기 비교" + "항목 확대/다음 미확정 항목
-순회"까지 구현.
+순회" + "검토창 내장 실제 페이지 캔버스"까지 구현.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import fitz  # PyMuPDF
-from PySide6.QtCore import QPoint, QRect, Qt
-from PySide6.QtGui import QImage, QKeySequence, QPixmap
+from PySide6.QtCore import QPoint, QRect, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QImage, QKeySequence, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QMenu,
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
@@ -95,15 +112,128 @@ from PySide6.QtWidgets import (
 import compare_view
 import dictionary_learning
 import template_fingerprint
-from detector import CONFIDENCE_LEVELS, Finding, find_occurrences, reload_dictionaries
+from detector import CONFIDENCE_LEVELS, Finding, classify_value, find_occurrences, reload_dictionaries
 from output import DOCUMENT_TYPES
-from page_viewer import PageViewerDialog
-from pdf_extract import SpanRef, page_of, rects_for_range
+from page_viewer import RENDER_SCALE, PageViewerDialog, render_page_pixmap
+from pdf_extract import SpanRef, page_of, rects_for_range, resolve_region, resolve_word_at
 
 # 6.3.6 "항목 클릭 시 자동 확대" -- 숫자 한두 자리 차이가 중요한 항목(주민번호 등)의
 # 오독을 줄이는 게 목적이므로 화면 표시(RENDER_SCALE=1.5)보다 훨씬 높은 배율로 다시 렌더링
 ZOOM_FACTOR = 4.0
 ZOOM_PADDING = 24.0  # PDF 좌표(pt) 기준 항목 주변 여백 -- 문맥이 조금 보여야 어떤 라벨인지 알 수 있음
+
+# 실사용자 피드백(신규): 사이드바 체크리스트만 보고 판단해야 해서 "실제 문서에
+# 있는지/탐지가 덜 됐는지"를 확인할 수 없고, 기본 Qt 회색 위젯이라 스캔하기도
+# 어렵다는 지적 -- 카드형 행 구분 + 색 대비 + 버튼 스타일만 정리(전면 재설계 아님).
+REVIEW_STYLESHEET = """
+QDialog { background-color: #f2f4f7; font-family: "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; font-size: 10pt; color: #1f2430; }
+QLabel#headerLabel { font-size: 12pt; font-weight: 600; padding-bottom: 4px; }
+QLabel#canvasHint { color: #5b6472; padding: 2px 0 6px 0; }
+QScrollArea { border: 1px solid #dde2e8; border-radius: 8px; background-color: #ffffff; }
+QWidget#findingRow { background-color: #ffffff; border: 1px solid #eceff3; border-radius: 6px; margin: 2px 4px; }
+QWidget#canvasPanel, QWidget#reviewPanel { background: transparent; }
+QPushButton { background-color: #ffffff; border: 1px solid #ccd3db; border-radius: 6px; padding: 6px 12px; }
+QPushButton:hover { background-color: #eef2f7; border-color: #a9b4c2; }
+QPushButton:pressed { background-color: #e1e6ec; }
+QPushButton:checked { background-color: #dbe7fb; border-color: #4f7fd6; }
+QPushButton#approveButton { background-color: #2f6feb; border-color: #2f6feb; color: white; font-weight: 600; padding: 8px 20px; }
+QPushButton#approveButton:hover { background-color: #1f5fd8; }
+QCheckBox { padding: 4px 2px; spacing: 8px; }
+QComboBox { border: 1px solid #ccd3db; border-radius: 6px; padding: 4px 8px; background: white; }
+"""
+
+
+class _InlineReviewCanvas(QLabel):
+    """검토 화면에 내장된 실제 PDF 페이지 캔버스 (신규).
+
+    기존 UI는 사이드바 체크박스 목록만 보여줘서, 검토자가 "이게 실제 문서
+    어디에 있는 값인지", "자동 탐지가 놓친 게 더 없는지"를 확인하려면 별도
+    창(직접 추가/미리보기 비교)을 열어야 했다 -- 실사용 피드백: 탐지 목록만
+    바로 보이니 실제 파일과 대조가 안 되고 정확도를 스스로 검증할 수 없다는 지적.
+
+    이 캔버스는 검토 화면 메인 흐름 안에 실제 페이지 이미지를 상시 띄우고:
+      - 탐지된 영역을 승인 여부에 따라 색이 다른 박스로 표시(빨강=마스킹 예정,
+        초록=제외) -- 체크박스와 항상 동기화됨(ReviewWindow가 페이지 전환/토글
+        시마다 다시 그림)
+      - 박스를 클릭하면 그 항목 체크를 바로 토글(사이드바를 오가지 않아도 됨)
+      - 박스가 없는 자리를 클릭/드래그하면 6.3.1과 같은 방식(pdf_extract의
+        resolve_word_at/resolve_region)으로 실제 텍스트를 찾아 새 항목으로
+        즉시 추가 -- "탐지가 덜 된 것 같다"를 실제 페이지 위에서 바로 해결
+    """
+    toggle_requested = Signal(object)                          # Finding
+    word_add_requested = Signal(float, float)                  # PDF 좌표(pt)
+    region_add_requested = Signal(float, float, float, float)  # PDF 좌표(pt) rect
+
+    def __init__(self, pixmap: QPixmap):
+        super().__init__()
+        self.setPixmap(pixmap)
+        self.setFixedSize(pixmap.size())
+        self.boxes: list[tuple[Finding, QRect, bool, bool]] = []  # (finding, rect_px, approved, highlighted)
+        self._drag_start: QPoint | None = None
+        self._drag_current: QPoint | None = None
+
+    def set_boxes(self, boxes: list[tuple[Finding, QRect, bool, bool]]):
+        self.boxes = boxes
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        for _f, rect, approved, highlighted in self.boxes:
+            if approved:
+                border, fill = QColor(214, 69, 69), QColor(214, 69, 69, 60)   # 빨강 -- 마스킹 예정
+            else:
+                border, fill = QColor(47, 158, 68), QColor(47, 158, 68, 40)   # 초록 -- 제외됨(유지)
+            painter.setPen(QPen(border, 2))
+            painter.setBrush(QBrush(fill))
+            painter.drawRect(rect)
+            if highlighted:  # 재검증 실패 후 "안 지워진" 항목 (기존 ⚠[미제거]와 같은 정보)
+                painter.setPen(QPen(QColor(230, 149, 0), 3, Qt.DashLine))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(rect.adjusted(-2, -2, 2, 2))
+        if self._drag_start is not None and self._drag_current is not None:
+            painter.setPen(QPen(QColor(30, 110, 230), 2, Qt.DashLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(QRect(self._drag_start, self._drag_current).normalized())
+        painter.end()
+
+    def _box_at(self, pt: QPoint) -> Finding | None:
+        for f, rect, _approved, _hl in self.boxes:
+            if rect.contains(pt):
+                return f
+        return None
+
+    def mousePressEvent(self, event):
+        self._drag_start = event.position().toPoint()
+        self._drag_current = self._drag_start
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start is not None:
+            self._drag_current = event.position().toPoint()
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        if self._drag_start is None:
+            return
+        start = self._drag_start
+        end = event.position().toPoint()
+        rect_px = QRect(start, end).normalized()
+        self._drag_start = None
+        self._drag_current = None
+        self.update()
+
+        if rect_px.width() < 3 and rect_px.height() < 3:
+            hit = self._box_at(start)
+            if hit is not None:
+                self.toggle_requested.emit(hit)
+            else:
+                self.word_add_requested.emit(start.x() / RENDER_SCALE, start.y() / RENDER_SCALE)
+        else:
+            self.region_add_requested.emit(
+                rect_px.left() / RENDER_SCALE, rect_px.top() / RENDER_SCALE,
+                rect_px.right() / RENDER_SCALE, rect_px.bottom() / RENDER_SCALE,
+            )
 
 
 class _ZoomDialog(QDialog):
@@ -152,7 +282,7 @@ class ReviewWindow(QDialog):
     ):
         super().__init__()
         self.setWindowTitle(f"검토 - {filename}")
-        self.resize(560, 520)
+        self.setStyleSheet(REVIEW_STYLESHEET)
         self.filename = filename
         self.findings = findings
         self.full_text = full_text
@@ -173,15 +303,60 @@ class ReviewWindow(QDialog):
         self.doc_type: str = DOCUMENT_TYPES[0]
         self._preview_dialog: compare_view.PreviewCompareDialog | None = None  # 6.3.2 ①
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
+        # 실제 페이지 캔버스(신규): "직접 추가"/"미리보기 비교"와 같은 조건(input_path가
+        # 있어야 원본을 다시 열 수 있음)으로만 만듦 -- 없으면 기존처럼 체크리스트뿐인
+        # 단일 패널로 동작(테스트 등 더미 filename만 있는 호출도 그대로 지원됨).
+        self._canvas_doc: fitz.Document | None = fitz.open(input_path) if input_path else None
+        self.canvas: _InlineReviewCanvas | None = None
+        self.canvas_page_index = 0
+        self.resize(1180, 640) if self._canvas_doc is not None else self.resize(560, 520)
+
+        outer = QHBoxLayout(self)
+
+        if self._canvas_doc is not None:
+            left_panel = QWidget()
+            left_panel.setObjectName("canvasPanel")
+            left_layout = QVBoxLayout(left_panel)
+            nav_row = QHBoxLayout()
+            prev_btn = QPushButton("◀ 이전 페이지")
+            prev_btn.clicked.connect(lambda: self._show_canvas_page(self.canvas_page_index - 1))
+            self.canvas_page_label = QLabel()
+            next_btn = QPushButton("다음 페이지 ▶")
+            next_btn.clicked.connect(lambda: self._show_canvas_page(self.canvas_page_index + 1))
+            nav_row.addWidget(prev_btn)
+            nav_row.addWidget(self.canvas_page_label)
+            nav_row.addWidget(next_btn)
+            nav_row.addStretch()
+            left_layout.addLayout(nav_row)
+            hint = QLabel(
+                "실제 문서 페이지입니다 — 빨간 박스는 마스킹 예정, 초록 박스는 제외된 항목입니다. "
+                "박스를 클릭하면 토글되고, 박스가 없는 곳을 클릭·드래그하면 놓친 항목을 바로 추가합니다."
+            )
+            hint.setObjectName("canvasHint")
+            hint.setWordWrap(True)
+            left_layout.addWidget(hint)
+            canvas_scroll = QScrollArea()
+            canvas_scroll.setWidgetResizable(False)
+            self._canvas_scroll = canvas_scroll
+            left_layout.addWidget(canvas_scroll, 1)
+            outer.addWidget(left_panel, 1)
+
+        right_panel = QWidget()
+        right_panel.setObjectName("reviewPanel")
+        layout = QVBoxLayout(right_panel)
+        outer.addWidget(right_panel, 1 if self._canvas_doc is not None else 0)
+
+        header = QLabel(
             f"<b>{filename}</b> — 탐지된 개인정보 {len(findings)}건. "
             "기본적으로 전부 마스킹 대상입니다. 마스킹하면 안 되는 항목만 체크 해제하세요."
-        ))
+        )
+        header.setObjectName("headerLabel")
+        header.setWordWrap(True)
+        layout.addWidget(header)
 
         if retry_notice:
             notice = QLabel(f"⚠ {retry_notice}")
-            notice.setStyleSheet("color: #b00; font-weight: bold;")
+            notice.setStyleSheet("color: #c0392b; font-weight: bold;")
             notice.setWordWrap(True)
             layout.addWidget(notice)
 
@@ -262,10 +437,17 @@ class ReviewWindow(QDialog):
             preview_compare.clicked.connect(self._open_preview_compare)
             btn_row.addWidget(preview_compare)
         approve = QPushButton("승인 (마스킹 진행)")
+        approve.setObjectName("approveButton")
         approve.clicked.connect(self._on_approve)
         btn_row.addStretch()
         btn_row.addWidget(approve)
         layout.addLayout(btn_row)
+
+        if self._canvas_doc is not None:
+            # 체크박스 목록이 전부 만들어진 뒤라야 캔버스가 승인 상태를 정확히 그림.
+            # 아직 아무 페이지도 안 본 시점이므로 첫 미검토 페이지(보통 0)부터 시작.
+            start_page = next((p for p, seen in sorted(self.page_reviewed.items()) if not seen), 0)
+            self._show_canvas_page(start_page)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -277,7 +459,93 @@ class ReviewWindow(QDialog):
         # 같이 닫아서(fitz.Document를 계속 열어둔 채) 남지 않게 함
         if self._preview_dialog is not None:
             self._preview_dialog.close()
+        if self._canvas_doc is not None:
+            self._canvas_doc.close()
         super().closeEvent(event)
+
+    # -- 실제 페이지 캔버스 (신규) --------------------------------------------
+    def _boxes_for_page(self, page_index: int) -> list[tuple[Finding, QRect, bool, bool]]:
+        checked_map = {id(f): cb for cb, f in self.checkboxes}
+        boxes: list[tuple[Finding, QRect, bool, bool]] = []
+        for f in self.findings:
+            if self.finding_page.get(id(f)) != page_index:
+                continue
+            if self.full_text[f.start:f.end] != f.value:
+                continue  # 방어적 점검: 어긋난 위치는 오버레이에 그리지 않음(다른 화면과 동일 원칙)
+            cb = checked_map.get(id(f))
+            approved = cb.isChecked() if cb is not None else f.approved
+            highlighted = (f.start, f.end) in self.highlight_spans
+            for rp in rects_for_range(self.full_text, self.spans, f.start, f.end):
+                x0, y0, x1, y1 = rp.rect
+                rect_px = QRect(
+                    int(x0 * RENDER_SCALE), int(y0 * RENDER_SCALE),
+                    max(int((x1 - x0) * RENDER_SCALE), 1), max(int((y1 - y0) * RENDER_SCALE), 1),
+                )
+                boxes.append((f, rect_px, approved, highlighted))
+        return boxes
+
+    def _show_canvas_page(self, page_index: int):
+        if self._canvas_doc is None:
+            return
+        page_index = max(0, min(page_index, self._canvas_doc.page_count - 1))
+        self.canvas_page_index = page_index
+        page = self._canvas_doc[page_index]
+        pixmap = render_page_pixmap(page)
+        canvas = _InlineReviewCanvas(pixmap)
+        canvas.set_boxes(self._boxes_for_page(page_index))
+        canvas.toggle_requested.connect(self._on_canvas_toggle)
+        canvas.word_add_requested.connect(self._on_canvas_word_add)
+        canvas.region_add_requested.connect(self._on_canvas_region_add)
+        self._canvas_scroll.setWidget(canvas)
+        self.canvas = canvas
+        self.canvas_page_label.setText(f"{page_index + 1} / {self._canvas_doc.page_count} 페이지 (실제 화면)")
+        # 캔버스로 페이지를 보는 것도 "이 페이지를 봤다"로 인정 -- 목록 스크롤과 같은 축(6.3.4)
+        if not self.page_reviewed.get(page_index, False):
+            self.page_reviewed[page_index] = True
+            self._refresh_page_buttons()
+
+    def _on_canvas_toggle(self, f: Finding):
+        for cb, ff in self.checkboxes:
+            if ff is f:
+                cb.setChecked(not cb.isChecked())  # toggled 시그널이 _on_checkbox_toggled에서 캔버스도 다시 그림
+                return
+
+    def _on_canvas_word_add(self, x: float, y: float):
+        page = self._canvas_doc[self.canvas_page_index]
+        result = resolve_word_at(self.full_text, page, self.spans, self.canvas_page_index, (x, y))
+        if result is None:
+            self.status_label.setText("클릭한 위치에서 텍스트를 찾지 못했습니다 (빈 공간이거나 이미지/도장 영역).")
+            return
+        self._add_finding_from_canvas(*result)
+
+    def _on_canvas_region_add(self, x0: float, y0: float, x1: float, y1: float):
+        page = self._canvas_doc[self.canvas_page_index]
+        result = resolve_region(self.full_text, page, self.spans, self.canvas_page_index, (x0, y0, x1, y1))
+        if result is None:
+            self.status_label.setText("드래그한 영역에서 텍스트를 찾지 못했습니다 (이미지·도장 등은 아직 지원하지 않습니다).")
+            return
+        self._add_finding_from_canvas(*result)
+
+    def _add_finding_from_canvas(self, start: int, end: int, value: str):
+        # 6.3.1 수동 추가(page_viewer.PageViewerDialog)와 같은 규칙: 유형은
+        # detector.classify_value로 형식 기반 자동 추정, 틀렸으면 사이드바에서
+        # 우클릭/확대로 확인 후 수동으로 유형을 바꿀 수 있음(기존 수동추가 경로와 동일).
+        if any(f.start == start and f.end == end for f in self.findings):
+            self.status_label.setText(f"'{value}'는 이미 목록에 있습니다.")
+            return
+        guessed_type = classify_value(value)
+        f = Finding(guessed_type, value, start, end, group="수동추가",
+                    approved=True, confidence="낮음", source="수동")
+        self.findings.append(f)
+        self._add_row_before_stretch(f)
+        self._show_canvas_page(self.canvas_page_index)  # 새 박스를 바로 반영
+        self.status_label.setText(f"실제 화면에서 추가됨: [{guessed_type}] {value}")
+        if guessed_type == "이름":
+            # 6.2.1: page_viewer 경로의 수동 추가와 동일하게 성씨 후보 신호로 기록
+            if dictionary_learning.record_candidate(value[0], "이름후보"):
+                reload_dictionaries()
+                self.status_label.setText(f"[사전 자동학습] '{value[0]}' 성씨 후보로 반영했습니다.")
+                self._refresh_promotions_panel()
 
     # -- 6.3.4 페이지 단위 진행 상태 표시 ------------------------------------
     def _build_progress_bar(self) -> QHBoxLayout:
@@ -359,6 +627,8 @@ class ReviewWindow(QDialog):
             if self.finding_page.get(id(f)) == page_index:
                 self.scroll.ensureWidgetVisible(cb)
                 break
+        if self._canvas_doc is not None:  # 실제 페이지 캔버스도 같은 페이지로 전환
+            self._show_canvas_page(page_index)
 
     def _check_visible_rows(self):
         """스크롤 영역에 실제로 보이는(교차하는) 항목들의 페이지를 검토완료로 표시.
@@ -405,23 +675,25 @@ class ReviewWindow(QDialog):
         cb.setChecked(f.approved)
         cb.setContextMenuPolicy(Qt.CustomContextMenu)
         cb.customContextMenuRequested.connect(lambda pos, box=cb, finding=f: self._show_context_menu(box, finding, pos))
-        cb.toggled.connect(self._on_checkbox_toggled)  # 6.3.2 ①: 열려있는 미리보기 비교 창을 실시간 갱신
+        # finding을 같이 넘겨야 _on_checkbox_toggled가 이 항목이 캔버스에 보이는
+        # 페이지인지 판단해서 캔버스도 같이 다시 그릴 수 있음(6.3.2 ① 미리보기 갱신과 같은 결)
+        cb.toggled.connect(lambda checked, finding=f: self._on_checkbox_toggled(checked, finding))
         return cb
 
     def _make_row_widget(self, cb: QCheckBox, f: Finding) -> QWidget:
-        """6.3.6: input_path가 있으면(원본을 다시 열 수 있으면) 체크박스 옆에
-        "🔍 확대" 버튼을 붙인 행을 만든다 -- 체크박스 클릭 자체는 이미 토글에
-        쓰이므로, 확대는 같은 클릭이 아니라 별도 버튼으로 분리."""
-        if not self.input_path:
-            return cb
+        """카드형 행(신규 디자인 정리) -- input_path가 있으면(원본을 다시 열
+        수 있으면) "🔍 확대" 버튼도 같이 붙인다. 체크박스 클릭 자체는 이미
+        토글에 쓰이므로, 확대는 같은 클릭이 아니라 별도 버튼으로 분리."""
         row = QWidget()
+        row.setObjectName("findingRow")
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setContentsMargins(8, 2, 8, 2)
         row_layout.addWidget(cb, 1)
-        zoom_btn = QPushButton("🔍 확대")
-        zoom_btn.setFixedWidth(70)
-        zoom_btn.clicked.connect(lambda _checked=False, finding=f: self._show_zoomed_view(finding))
-        row_layout.addWidget(zoom_btn)
+        if self.input_path:
+            zoom_btn = QPushButton("🔍 확대")
+            zoom_btn.setFixedWidth(70)
+            zoom_btn.clicked.connect(lambda _checked=False, finding=f: self._show_zoomed_view(finding))
+            row_layout.addWidget(zoom_btn)
         return row
 
     def _show_zoomed_view(self, f: Finding):
@@ -540,6 +812,8 @@ class ReviewWindow(QDialog):
                                  approved=True, confidence="낮음", source="수동")
                 self.findings.append(new_f)
                 self._add_row_before_stretch(new_f)
+        if self.canvas is not None:  # 방금 추가/토글된 항목이 지금 보이는 페이지일 수 있음
+            self._show_canvas_page(self.canvas_page_index)
 
     def _open_manual_add(self):
         # 6.3.1: 아직 검토완료로 안 넘어간 페이지가 있으면 거기서 시작 -- 어차피
@@ -560,6 +834,8 @@ class ReviewWindow(QDialog):
                     reload_dictionaries()
                     self.status_label.setText(f"[사전 자동학습] '{f.value[0]}' 성씨 후보로 반영했습니다.")
                     self._refresh_promotions_panel()  # 방금 반영된 항목도 되돌리기 목록에 바로 반영
+        if self.canvas is not None and dlg.new_findings:
+            self._show_canvas_page(self.canvas_page_index)  # 별도 창에서 추가된 항목도 캔버스에 반영
 
     # -- 6.3.2 ① 승인 전 원본-마스킹본 미리보기 비교 -------------------------
     def _is_checked(self, f: Finding) -> bool:
@@ -568,9 +844,13 @@ class ReviewWindow(QDialog):
                 return cb.isChecked()
         return f.approved
 
-    def _on_checkbox_toggled(self, _checked: bool):
+    def _on_checkbox_toggled(self, _checked: bool, f: Finding | None = None):
         if self._preview_dialog is not None:
             self._preview_dialog.refresh()
+        # 실제 페이지 캔버스(신규): 토글된 항목이 지금 캔버스에 보이는 페이지 것이면
+        # 색(빨강/초록)을 바로 반영 -- 사이드바 체크박스와 캔버스 박스가 항상 같은 상태를 보여줌
+        if self.canvas is not None and f is not None and self.finding_page.get(id(f)) == self.canvas_page_index:
+            self._show_canvas_page(self.canvas_page_index)
 
     def _open_preview_compare(self):
         if self._preview_dialog is not None:

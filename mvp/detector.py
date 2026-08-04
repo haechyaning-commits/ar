@@ -134,6 +134,47 @@ def detect_card(text: str) -> list[Finding]:
     return out
 
 
+def candidate_hints(text: str, findings: list[Finding]) -> list[Finding]:
+    """실사용자 피드백(신규, 아이디어 7): 정규식 형태로는 PII처럼 보이지만
+    문맥 조건(계좌/카드 라벨 근접, 주민번호 체크섬)이 안 맞아 자동탐지에서
+    빠진 값을 검토자에게 "확인해볼 만한 곳"으로만 안내한다.
+
+    ⚠ 자동으로 탐지 목록(승인 대상)에 넣지 않는다 -- 계좌/카드번호 정규식은
+    문맥 없이 쓰면 오탐이 많다는 게 이미 detect_account/detect_card의 설계
+    근거였으므로(6.2), 여기서도 같은 값을 승인 대상으로 올리면 그 설계를
+    무력화하게 됨. 대신 review_ui.py의 캔버스가 점선 힌트로만 표시하고,
+    검토자가 실제로 클릭해야만(사람의 최종 판단) 정식 항목으로 전환된다 --
+    "자동 탐지가 100%가 아니니 사람이 최종 확인한다"는 이 도구의 핵심 원칙과
+    같은 방향.
+
+    반환되는 Finding의 type은 실제 마스킹 유형이 아니라 화면 표시용 라벨
+    ("...(추정)")이다 -- 힌트가 클릭되면 review_ui._add_finding_from_canvas가
+    detector.classify_value로 다시 분류해 정식 유형을 정한다."""
+    covered = {(f.start, f.end) for f in findings}
+    hints: list[Finding] = []
+
+    for m in RRN_RE.finditer(text):
+        if (m.start(), m.end()) in covered:
+            continue
+        if not _rrn_checksum_valid(m.group()):
+            hints.append(Finding("주민등록번호(추정)", m.group(), m.start(), m.end(),
+                                  group="후보힌트", confidence="낮음", source="힌트"))
+
+    for m in ACCOUNT_RE.finditer(text):
+        if (m.start(), m.end()) in covered:
+            continue
+        hints.append(Finding("계좌번호(추정)", m.group(), m.start(), m.end(),
+                              group="후보힌트", confidence="낮음", source="힌트"))
+
+    for m in CARD_RE.finditer(text):
+        if (m.start(), m.end()) in covered:
+            continue
+        hints.append(Finding("카드번호(추정)", m.group(), m.start(), m.end(),
+                              group="후보힌트", confidence="낮음", source="힌트"))
+
+    return hints
+
+
 def _find_after_labels(text: str, labels: list[str]) -> list[tuple[int, int, str]]:
     """'라벨: 값' 패턴에서 라벨 뒤 첫 한글 토큰(2~4자)의 (start, end, word)를 찾음."""
     pattern = re.compile("(" + "|".join(sorted(map(re.escape, labels), key=len, reverse=True)) + r")\s*[:：]\s*")

@@ -20,6 +20,7 @@ echo "=== template_fingerprint ==="; python3 test_template_fingerprint.py
 echo "=== compare_view (클릭) ==="; $RUN_UI test_compare_view.py
 echo "=== 실사용자 편의 기능 (클릭) ==="; $RUN_UI test_convenience_features.py
 echo "=== 검토창 내장 실제 페이지 캔버스 (클릭) ==="; $RUN_UI test_inline_review_canvas.py
+echo "=== 처리 이력 조회 (클릭) ==="; $RUN_UI test_history_view.py
 echo "=== end-to-end (클릭) ==="; $RUN_UI test_end_to_end_click.py
 
 echo

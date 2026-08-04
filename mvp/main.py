@@ -36,7 +36,8 @@ def process_file(input_path: str, workspace_dir: str | None = None,
                   _auto_approve_after_ms: int | None = None,
                   _auto_processor_name: str | None = None,
                   _auto_reprocess_confirm: bool | None = None,
-                  _auto_open_comparison: bool | None = None) -> int:
+                  _auto_open_comparison: bool | None = None,
+                  batch_index: int | None = None, batch_total: int | None = None) -> int:
     """반환값: 0=성공, 1=탐지 없음(그대로 종료), 2=검토 취소,
     3=자체검증 실패(헤드리스 모드에서만 -- 대화형에서는 검토 화면으로 복귀함),
     4=재실행 확인에서 취소, 5=원본이동/마커/로그/리포트 커밋 실패(원본 무변경, 롤백됨),
@@ -52,6 +53,10 @@ def process_file(input_path: str, workspace_dir: str | None = None,
     환경에서 대신 응답하는 테스트 전용 훅(다른 `_auto_*` 인자들과 동일한 관례) --
     지정하면 그 값을 답으로 쓰고 실제 대화상자는 띄우지 않음, 생략(None)하면
     실제로 사용자에게 물어봄.
+    batch_index/batch_total(실사용자 피드백, 아이디어 10): process_batch()가 몇
+    번째 파일을 처리 중인지 넘겨주면 검토창 헤더에도 "[i/총N]"으로 표시됨 --
+    지금까지는 콘솔에만 찍혀서 여러 파일 처리할 때 검토 화면만 보면 진행 상황을
+    알 수 없었음.
     """
     src = Path(input_path).resolve()
     workspace = Path(workspace_dir) if workspace_dir else output.app_base_dir()
@@ -119,14 +124,16 @@ def process_file(input_path: str, workspace_dir: str | None = None,
         reviewed = run_review(src.name, findings, full_text, spans, total_pages, str(src),
                                _auto_approve_after_ms=_auto_approve_after_ms,
                                retry_notice=retry_notice, highlight_spans=highlight_spans,
-                               page_sizes=sizes, warning_pages=warning_pages)
+                               page_sizes=sizes, warning_pages=warning_pages,
+                               batch_index=batch_index, batch_total=batch_total)
         if reviewed is None:
             print(f"[{src.name}] 검토가 취소되었습니다. 처리하지 않음.")
             return 2
         findings = reviewed.findings
 
         result = process_atomic(str(src), findings, str(workspace),
-                                 processor=processor, doc_type=reviewed.doc_type)
+                                 processor=processor, doc_type=reviewed.doc_type,
+                                 review_seconds=reviewed.review_seconds)
         if result.success or result.error != "self_check_failed":
             break
 
@@ -179,12 +186,21 @@ def process_file(input_path: str, workspace_dir: str | None = None,
 def process_batch(
     input_paths: list[str], workspace_dir: str | None = None,
     _auto_approve_after_ms: int | None = None,
+    _auto_processor_name: str | None = None,
+    _auto_reprocess_confirm: bool | None = None,
+    _auto_open_comparison: bool | None = None,
 ) -> dict[str, int]:
     """여러 파일을 대기열로 순차 처리 (7번 정책표).
 
     배치 자동 처리가 아니라 파일마다 사람이 검토 화면에서 확인하는 구조 --
     이 함수는 process_file()을 파일 개수만큼 반복 호출할 뿐, 검토를 건너뛰지
     않음. 한 파일이 실패/취소돼도 나머지 파일 처리는 계속 진행.
+
+    _auto_processor_name/_auto_reprocess_confirm/_auto_open_comparison: process_file()과
+    같은 헤드리스 테스트 전용 훅 -- 배치 안 각 파일에도 동일하게 전달한다(그동안은
+    _auto_approve_after_ms만 전달돼, 배치를 실제 클릭으로 몰아보는(승인은 사람이
+    직접 하되 처리자 이름/재실행 확인 같은 부수 대화상자만 자동 응답) 통합 테스트를
+    짤 수 없었음).
 
     반환값: {입력 경로: process_file() 반환코드} 딕셔너리.
     """
@@ -194,6 +210,10 @@ def process_batch(
         print(f"\n=== [{i}/{total}] {Path(input_path).name} 처리 시작 ===")
         results[input_path] = process_file(
             input_path, workspace_dir, _auto_approve_after_ms=_auto_approve_after_ms,
+            _auto_processor_name=_auto_processor_name,
+            _auto_reprocess_confirm=_auto_reprocess_confirm,
+            _auto_open_comparison=_auto_open_comparison,
+            batch_index=i, batch_total=total,
         )
 
     succeeded = sum(1 for rc in results.values() if rc == 0)
@@ -208,10 +228,30 @@ def process_batch(
     return results
 
 
+def open_history(workspace_dir: str | None = None, _auto_close_after_ms: int | None = None) -> None:
+    """실사용자 아이디어 8: 처리 이력 조회 UI(설계서 11번 향후 확장 후보)를 연다.
+    `python3 main.py --history`로 실행 -- 감사로그를 CSV로 직접 열지 않고
+    도구 안에서 지난 처리 내역을 보고 원본/결과물을 비교해서 확인할 수 있음.
+    _auto_close_after_ms: 헤드리스 통합 테스트 전용(다른 _auto_* 인자들과 같은 관례)."""
+    from PySide6.QtCore import QTimer
+    import history_view
+
+    QApplication.instance() or QApplication([])
+    workspace = Path(workspace_dir) if workspace_dir else output.app_base_dir()
+    dlg = history_view.HistoryDialog(workspace)
+    if _auto_close_after_ms is not None:
+        QTimer.singleShot(_auto_close_after_ms, dlg.accept)
+    dlg.exec()
+
+
 if __name__ == "__main__":
+    if len(sys.argv) >= 2 and sys.argv[1] == "--history":
+        open_history()
+        sys.exit(0)
     if len(sys.argv) < 2:
         print("사용법: python3 main.py <입력1.pdf> [입력2.pdf ...]")
         print("  결과는 프로그램(.exe/스크립트) 옆에 원본_보관/ 마스킹완료/ 요약리포트/ 로그/ 로 모입니다.")
+        print("  python3 main.py --history 로 지난 처리 이력을 조회할 수 있습니다.")
         sys.exit(1)
     batch_results = process_batch(sys.argv[1:])
     sys.exit(0 if all(rc == 0 for rc in batch_results.values()) else 1)

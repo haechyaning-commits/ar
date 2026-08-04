@@ -165,6 +165,37 @@ def test_business_name_group_rendered_separately(app):
     window.close()
 
 
+def test_batch_progress_shown_in_header(app):
+    """아이디어 10: 배치 처리 중이면 검토창 헤더에 [i/총N]이 표시됨."""
+    print("test_batch_progress_shown_in_header")
+    findings = detect_all(SAMPLE)
+    window = ReviewWindow("_dummy_audit_file.pdf", findings, batch_index=3, batch_total=10)
+
+    from PySide6.QtWidgets import QLabel
+    header = next(lbl for lbl in window.findChildren(QLabel) if lbl.objectName() == "headerLabel")
+    check("헤더에 [3/10]이 표시됨", "[3/10]" in header.text(), header.text())
+    window.close()
+
+    single = ReviewWindow("_dummy_audit_file.pdf", findings)
+    header2 = next(lbl for lbl in single.findChildren(QLabel) if lbl.objectName() == "headerLabel")
+    check("배치 정보 없으면(단일 파일) 헤더에 대괄호 접두어가 안 붙음", not header2.text().startswith("["))
+    single.close()
+
+
+def test_review_seconds_recorded_on_approve(app):
+    """아이디어 9: 검토 시작~승인까지 걸린 시간이 review_seconds로 기록됨."""
+    print("test_review_seconds_recorded_on_approve")
+    findings = detect_all(SAMPLE)
+    window = ReviewWindow("_dummy_audit_file.pdf", findings)
+    check("승인 전엔 review_seconds가 0", window.review_seconds == 0.0)
+
+    QTimer.singleShot(120, lambda: click_button(window, "승인"))
+    window.exec()
+
+    check("승인 후 review_seconds가 0보다 큼(실제로 시간이 흘렀음)", window.review_seconds > 0,
+          str(window.review_seconds))
+
+
 def main():
     app = QApplication.instance() or QApplication([])
     tests = [
@@ -174,6 +205,8 @@ def main():
         test_deselect_all_button,
         test_cancel_close_does_not_mutate_findings,
         test_business_name_group_rendered_separately,
+        test_batch_progress_shown_in_header,
+        test_review_seconds_recorded_on_approve,
     ]
     for t in tests:
         t(app)

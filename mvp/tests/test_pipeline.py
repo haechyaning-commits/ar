@@ -115,6 +115,24 @@ def test_log_accumulates_across_multiple_runs():
           all(len(r["original_sha256"]) == 64 for r in rows))
 
 
+def test_review_seconds_reaches_audit_log():
+    """아이디어 9: review_ui가 잰 검토 소요 시간이 process_atomic을 거쳐
+    audit_log.csv까지 실제로 도달하는지(끊기는 지점 없이) 확인."""
+    print("test_review_seconds_reaches_audit_log")
+    ws = _new_tmp()
+    src_dir = _new_tmp()
+    src = src_dir / "file.pdf"
+    _make_dummy_pdf(src, "김테스트")
+
+    r = process_atomic(str(src), _detect(src), str(ws), review_seconds=12.34)
+    check("처리 성공", r.success)
+
+    log_path = ws / "로그" / "audit_log.csv"
+    with open(log_path, encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    check("로그에 review_seconds 컬럼이 기록됨", rows[0].get("review_seconds") == "12.3", rows[0].get("review_seconds"))
+
+
 def test_summary_report_includes_rotated_text_warning():
     print("test_summary_report_includes_rotated_text_warning")
     ws = _new_tmp()
@@ -196,6 +214,7 @@ def main():
     tests = [
         test_filename_collision_gets_numbered_not_overwritten,
         test_log_accumulates_across_multiple_runs,
+        test_review_seconds_reaches_audit_log,
         test_summary_report_includes_rotated_text_warning,
         test_workspace_precondition_broken_fails_cleanly,
         test_real_commit_failure_via_immutable_log_dir,

@@ -66,6 +66,7 @@ def process_atomic(
     workspace_dir: str,
     processor: str | None = None,
     doc_type: str = DOCUMENT_TYPES[0],
+    review_seconds: float = 0.0,
 ) -> PipelineResult:
     """탐지->검토 완료된 findings로 마스킹부터 요약 리포트까지를 원자적으로 수행.
 
@@ -135,6 +136,7 @@ def process_atomic(
                 rotated_text_warning=result.rotated_text_warning,
                 hidden_content_warning=result.hidden_content_warning,
                 processor=processor,
+                review_seconds=review_seconds,
             )
             write_summary_report(
                 folders.reports,

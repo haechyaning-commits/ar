@@ -115,6 +115,34 @@ def test_log_accumulates_across_multiple_runs():
           all(len(r["original_sha256"]) == 64 for r in rows))
 
 
+def test_summary_report_includes_rotated_text_warning():
+    print("test_summary_report_includes_rotated_text_warning")
+    ws = _new_tmp()
+    src_dir = _new_tmp()
+
+    # ⚠ 회전 텍스트 경고(6.5.1-4)는 audit_log.csv에는 이미 기록되고 있었지만,
+    # 6.8 요약 리포트(reports_dir/*_요약.txt -- "로그를 뒤지지 않고 바로 첨부
+    # 가능한 증빙")에는 빠져 있었다. 실제로 그 파일을 열어 확인한다.
+    src = src_dir / "회전문서.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "신청인: 김테스트 (010-1234-5678)", fontsize=11, fontname="korea")
+    page.insert_textbox(fitz.Rect(72, 150, 100, 400), "비고: 회전된 텍스트",
+                         fontsize=11, fontname="korea", rotate=90)
+    doc.save(src)
+    doc.close()
+
+    result = process_atomic(str(src), _detect(src), str(ws))
+    check("처리 성공", result.success, str(result.error))
+    check("rotated_text_warning 플래그가 True로 반환됨", result.rotated_text_warning)
+
+    report_path = ws / "요약리포트" / f"{Path(result.output_path).stem}_요약.txt"
+    check("요약 리포트 파일이 생성됨", report_path.exists(), str(report_path))
+    content = report_path.read_text(encoding="utf-8")
+    check("요약 리포트 본문에 회전 텍스트 경고가 포함됨",
+          "회전된 텍스트가 있습니다" in content, content)
+
+
 def test_workspace_precondition_broken_fails_cleanly():
     print("test_workspace_precondition_broken_fails_cleanly")
     ws = _new_tmp()
@@ -168,6 +196,7 @@ def main():
     tests = [
         test_filename_collision_gets_numbered_not_overwritten,
         test_log_accumulates_across_multiple_runs,
+        test_summary_report_includes_rotated_text_warning,
         test_workspace_precondition_broken_fails_cleanly,
         test_real_commit_failure_via_immutable_log_dir,
     ]

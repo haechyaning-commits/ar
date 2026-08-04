@@ -141,10 +141,25 @@ def default_processor_name() -> str:
 # ---------------------------------------------------------------------------
 # 처리 결과 요약 리포트 (6.8)
 # ---------------------------------------------------------------------------
-def write_summary_report(reports_dir: Path, record: dict, masked_counts: dict[str, int]) -> Path:
+def write_summary_report(
+    reports_dir: Path, record: dict, masked_counts: dict[str, int],
+    rotated_text_warning: bool = False, hidden_content_warning: bool = False,
+) -> Path:
+    """⚠ 회전텍스트/숨김콘텐츠 경고(6.5.1-2/4)는 audit_log.csv(6.7)에는 이미
+    남고 있었지만, 이 리포트에는 빠져 있었다 -- 6.8의 목적이 "로그를 뒤지지
+    않고 바로 첨부 가능한 증빙"인데, 정작 "자동 탐지가 놓쳤을 수 있으니 육안
+    재확인이 필요하다"는 가장 중요한 안전 관련 사실이 CSV를 열어야만 보이는
+    상태였다. 검토자가 이 한 장만 보고 재확인 필요 여부를 판단할 수 있도록
+    경고가 있을 때만 눈에 띄게 한 줄 추가한다."""
     stem = Path(record["결과물파일명"]).stem
     report_path = reports_dir / f"{stem}_요약.txt"
     counts_lines = "\n".join(f"  - {k}: {v}건" for k, v in masked_counts.items()) or "  (없음)"
+    warning_lines = []
+    if rotated_text_warning:
+        warning_lines.append("  - ⚠ 회전된 텍스트가 있습니다. 자동 탐지가 놓쳤을 수 있으니 육안으로 재확인하세요.")
+    if hidden_content_warning:
+        warning_lines.append("  - ⚠ 주석/폼필드/첨부파일 등 숨겨진 콘텐츠가 있습니다. 별도 확인이 필요합니다.")
+    warning_block = ("\n경고 사항:\n" + "\n".join(warning_lines) + "\n") if warning_lines else ""
     content = (
         f"처리 결과 요약\n"
         f"================\n"
@@ -153,6 +168,7 @@ def write_summary_report(reports_dir: Path, record: dict, masked_counts: dict[st
         f"처리자      : {record['처리자']}\n"
         f"결과물 파일명: {record['결과물파일명']}\n"
         f"마스킹 유형별 건수:\n{counts_lines}\n"
+        f"{warning_block}"
     )
     report_path.write_text(content, encoding="utf-8")
     return report_path

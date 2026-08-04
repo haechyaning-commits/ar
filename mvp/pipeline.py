@@ -145,6 +145,8 @@ def process_atomic(
                     "결과물파일명": masked_dest.name,
                 },
                 result.masked_counts,
+                rotated_text_warning=result.rotated_text_warning,
+                hidden_content_warning=result.hidden_content_warning,
             )
         except Exception as exc:
             # 트랜잭션 실패 -> 이미 반영된 부분을 되돌려 원본은 원래 위치로 복구

@@ -14,6 +14,8 @@ echo "=== detector ==="; python3 test_detector.py
 echo "=== masker ==="; python3 test_masker.py
 echo "=== pipeline ==="; python3 test_pipeline.py
 echo "=== review_ui (클릭) ==="; $RUN_UI test_review_ui_click.py
+echo "=== 사전 되돌리기 UI (클릭) ==="; $RUN_UI test_dictionary_revert_ui.py
+echo "=== 진행바 세부 보강(경고/필터) ==="; $RUN_UI test_page_progress_extras.py
 echo "=== template_fingerprint ==="; python3 test_template_fingerprint.py
 echo "=== compare_view (클릭) ==="; $RUN_UI test_compare_view.py
 echo "=== 실사용자 편의 기능 (클릭) ==="; $RUN_UI test_convenience_features.py

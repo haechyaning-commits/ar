@@ -234,26 +234,45 @@ def raw_byte_leftover(saved_path: str, original_values) -> list[str]:
 # ---------------------------------------------------------------------------
 # 회전 텍스트 / 숨겨진 콘텐츠 경고, 메타데이터 제거
 # ---------------------------------------------------------------------------
-def has_rotated_text(doc: fitz.Document) -> bool:
-    for page in doc:
+def rotated_text_pages(doc: fitz.Document) -> set[int]:
+    """회전된 텍스트가 있는 페이지 번호(0-based) 집합. 6.3.4의 진행바 경고 페이지
+    색 강조가 검토(마스킹 이전) 단계에서부터 쓸 수 있도록 has_rotated_text()에서
+    페이지 단위로 뽑아냄."""
+    pages = set()
+    for page_index, page in enumerate(doc):
         for block in page.get_text("dict").get("blocks", []):
             for line in block.get("lines", []):
                 _, dy = line.get("dir", (1, 0))
                 if abs(dy) > 0.01:
-                    return True
-    return False
+                    pages.add(page_index)
+                    break
+    return pages
+
+
+def has_rotated_text(doc: fitz.Document) -> bool:
+    return bool(rotated_text_pages(doc))
+
+
+def hidden_content_pages(doc: fitz.Document) -> set[int]:
+    """숨겨진 콘텐츠가 있는 페이지 번호(0-based) 집합 (6.3.4 진행바 경고 강조용).
+    주석/폼필드는 실제로 특정 페이지에 속하므로 그 페이지 번호를 그대로 씀.
+    첨부파일/OCG는 PDF 구조상 문서 전체에 걸린 것이라 특정 페이지 하나로 단정할
+    근거가 없음 -- 엉뚱한 페이지 하나에만 표시해서 다른 페이지의 위험을 과소평가하게
+    만들기보다, "확실하지 않으면 표시한다"는 기존 정책과 같은 방향으로 모든 페이지에
+    경고를 붙임(6.5.1-2 OCG 경고와 같은 성격: 거짓 안전 방지 우선)."""
+    pages = set()
+    for page_index, page in enumerate(doc):
+        if list(page.annots() or []):
+            pages.add(page_index)
+        if page.first_widget is not None:
+            pages.add(page_index)
+    if doc.embfile_count() > 0 or doc.get_ocgs():
+        pages |= set(range(doc.page_count))
+    return pages
 
 
 def has_hidden_content(doc: fitz.Document) -> bool:
-    for page in doc:
-        if list(page.annots() or []):
-            return True
-        if page.first_widget is not None:
-            return True
-    if doc.embfile_count() > 0:
-        return True
-    # 설계서 6.5.1-2가 약속한 OCG(선택적 콘텐츠 레이어) 검사가 빠져있던 부분 -> 추가
-    return bool(doc.get_ocgs())
+    return bool(hidden_content_pages(doc))
 
 
 # ---------------------------------------------------------------------------

@@ -22,8 +22,14 @@
   채움). 승인 시점에 아직 화면에 스크롤되어 보인 적 없는 페이지가 있으면 경고를
   띄우고 승인을 차단. 진행바의 페이지 버튼은 클릭하면 해당 페이지의 첫 항목으로
   점프하는 용도로만 쓰고(눌러야 검토완료 처리되는 게 아님), 배지로 페이지별
-  탐지 건수를 보여줌. "안 본 페이지만 보기" 필터·경고 페이지 색 강조는 아직
-  미구현(향후 확장).
+  탐지 건수를 보여줌. **경고 페이지 색 강조**: main.py가 마스킹 이전(검토 화면을
+  띄우기 전)에 `masker.rotated_text_pages()`/`hidden_content_pages()`로 미리
+  페이지 단위 경고 목록을 계산해 넘겨주면, 그 페이지 버튼에 주황 테두리 +
+  "⚠" 표시를 붙임 — 검토완료(초록 배경)와는 독립적인 축이라, 이미 스크롤해서
+  본 페이지도 "자동 탐지가 놓쳤을 수 있다"는 경고는 계속 남아있음. **"안 본
+  페이지만 보기" 필터**: 체크하면 이미 검토완료된 페이지의 항목 행을 숨겨
+  미검토 페이지 항목만 순서대로 보여주고, 스크롤로 새 페이지가 검토완료될
+  때마다 그 페이지도 자동으로 목록에서 빠짐.
 - 수동 추가 (6.3.1): "직접 추가" 버튼을 누르면 page_viewer.PageViewerDialog가
   뜸 -- PDF 페이지를 이미지로 렌더링해서 보여주고, 드래그(영역 지정)/클릭(단어
   하나)/텍스트 직접 입력(문서 전체 검색, 6.3.3과 같은 find_occurrences 재사용)
@@ -36,7 +42,13 @@
 - 사전 자동 학습(6.2.1): 검토자가 이미 하는 행동(자동탐지 이름 체크 해제 = 제외
   후보, 수동으로 이름 추가 = 성씨 후보)만으로 조용히 후보를 누적(`dictionary_learning`).
   확인 팝업 없이 통보만 하고, 임계값(3회) 도달 시 실제 사전에 반영 + `detector.reload_dictionaries()`로
-  즉시 재적용(배치 처리 중 다음 파일부터 바로 반영되도록)
+  즉시 재적용(배치 처리 중 다음 파일부터 바로 반영되도록). "되돌리기": 창 상단에
+  최근 반영 내역(`dictionary_learning.get_recent_promotions()`)을 항목마다 되돌리기
+  버튼과 함께 보여줌 -- 반영 시점(예: 승인 버튼을 누르는 순간)엔 창이 곧바로
+  닫혀 그 자리에서 되돌리기를 누를 기회가 없으므로, 대신 다음에 뜨는 검토
+  창(배치의 다음 파일 등)마다 매번 다시 보여주는 방식으로 "언제든 되돌릴 수
+  있음"을 보장. 수동 추가로 즉시 반영되는 경우(창이 안 닫힘)는 그 자리에서도
+  바로 갱신해서 보여줌
 - 자체검증 실패 후 재시도: main.py가 self-check 실패로 이 화면을 다시 띄울 때
   `retry_notice`/`highlight_spans`를 넘기면, 안내 문구와 함께 안 지워진 항목에
   "⚠[미제거]" 표시를 붙여 검토자가 바로 찾아 재확인할 수 있게 함(8번 리스크의
@@ -136,6 +148,7 @@ class ReviewWindow(QDialog):
         spans: list[SpanRef] | None = None, total_pages: int = 1, input_path: str = "",
         retry_notice: str | None = None, highlight_spans: set[tuple[int, int]] | None = None,
         page_sizes: list[tuple[float, float]] | None = None,
+        warning_pages: set[int] | None = None,
     ):
         super().__init__()
         self.setWindowTitle(f"검토 - {filename}")
@@ -148,11 +161,14 @@ class ReviewWindow(QDialog):
         self.input_path = input_path
         self.highlight_spans = highlight_spans or set()
         self.page_sizes = page_sizes or []
+        self.warning_pages = warning_pages or set()
         self.checkboxes: list[tuple[QCheckBox, Finding]] = []
+        self.row_widgets: dict[int, QWidget] = {}  # id(finding) -> inner_layout에 실제로 들어간 행 위젯
         self.finding_page: dict[int, int] = {}  # id(finding) -> page_index
         self.page_buttons: dict[int, QPushButton] = {}
         self.page_counts: dict[int, int] = {}
         self.page_reviewed: dict[int, bool] = {}  # 스크롤로 실제 화면에 보인 적 있는 페이지
+        self.show_unseen_only: bool = False  # 6.3.4 "안 본 페이지만 보기" 필터
         self.approved_result: bool | None = None  # None=닫힘/취소, True=승인
         self.doc_type: str = DOCUMENT_TYPES[0]
         self._preview_dialog: compare_view.PreviewCompareDialog | None = None  # 6.3.2 ①
@@ -177,6 +193,18 @@ class ReviewWindow(QDialog):
         doc_type_row.addWidget(self.doc_type_combo)
         doc_type_row.addStretch()
         layout.addLayout(doc_type_row)
+
+        # 6.2.1 "되돌리기": 이전 문서(또는 이전 실행)에서 자동 반영된 사전 항목을
+        # 이 창에서 바로 되돌릴 수 있게 함. 반영 시점(예: _on_approve 안에서 "제외"
+        # 후보가 임계값을 넘는 순간)에는 창이 곧바로 닫혀 토스트를 띄워도 보이지
+        # 않으므로, 그 대신 다음에 뜨는 검토 창(배치 처리 중 다음 파일, 또는 다음
+        # 실행)마다 최근 반영 내역을 매번 다시 보여주는 방식으로 "되돌리기 가능"
+        # 요구사항을 만족시킴 -- 언제 반영됐는지와 무관하게 항상 되돌릴 기회가 있음.
+        self.promotions_widget = QWidget()
+        self.promotions_layout = QVBoxLayout(self.promotions_widget)
+        self.promotions_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.promotions_widget)
+        self._refresh_promotions_panel()
 
         for f in findings:
             self.finding_page[id(f)] = page_of(self.spans, f.start)
@@ -261,29 +289,67 @@ class ReviewWindow(QDialog):
             self.page_reviewed[page_index] = False
             btn = QPushButton(self._page_button_text(page_index))
             btn.setFixedWidth(44)
-            btn.setToolTip(f"페이지 {page_index + 1}로 이동 (스크롤해서 보면 자동으로 검토완료 표시됨)")
+            tooltip = f"페이지 {page_index + 1}로 이동 (스크롤해서 보면 자동으로 검토완료 표시됨)"
+            if page_index in self.warning_pages:
+                tooltip += " — ⚠ 회전된 텍스트/숨겨진 콘텐츠가 있어 자동 탐지가 놓쳤을 수 있으니 육안으로 재확인하세요."
+            btn.setToolTip(tooltip)
             btn.clicked.connect(lambda _checked=False, p=page_index: self._jump_to_page(p))
             self.page_buttons[page_index] = btn
             row.addWidget(btn)
+        row.addSpacing(8)
+        # QCheckBox가 아니라 체크 가능한 QPushButton으로 만듦 -- 실제 탐지
+        # 항목의 체크박스와 위젯 타입이 섞이면 findChildren(QCheckBox) 같은
+        # 일반적인 탐색이 이 필터 토글까지 "항목 체크박스"로 잘못 집어낼 수 있음
+        self.unseen_only_toggle = QPushButton("안 본 페이지만 보기")
+        self.unseen_only_toggle.setCheckable(True)
+        self.unseen_only_toggle.toggled.connect(self._on_unseen_filter_toggled)
+        row.addWidget(self.unseen_only_toggle)
         row.addStretch()
         self._refresh_page_buttons()
         return row
 
     def _page_button_text(self, page_index: int) -> str:
         count = self.page_counts.get(page_index, 0)
-        return f"{page_index + 1}\n({count}건)" if count else f"{page_index + 1}"
+        label = f"{page_index + 1}⚠" if page_index in self.warning_pages else f"{page_index + 1}"
+        return f"{label}\n({count}건)" if count else label
 
     def _refresh_page_buttons(self):
         for page_index, btn in self.page_buttons.items():
             btn.setText(self._page_button_text(page_index))
-            btn.setStyleSheet("background-color: #b7e3b7;" if self.page_reviewed.get(page_index) else "")
+            # 배경색은 검토완료 여부(초록), 테두리는 경고 페이지 여부(주황)를 각각
+            # 독립적으로 표시 -- 검토를 마쳤어도 회전텍스트/숨김콘텐츠 경고는
+            # "자동 탐지가 놓쳤을 수 있다"는 별개의 위험이라 계속 눈에 띄어야 함
+            style = "background-color: #b7e3b7;" if self.page_reviewed.get(page_index) else ""
+            if page_index in self.warning_pages:
+                style += "border: 2px solid #e69500;"
+            btn.setStyleSheet(style)
         self._update_progress_label()
+        self._apply_unseen_filter()
 
     def _update_progress_label(self):
         done = sum(1 for v in self.page_reviewed.values() if v)
         total = len(self.page_reviewed)
         bar = "■" * done + "□" * (total - done)
         self.progress_label.setText(f"[{bar}]  {done} / {total} 페이지 검토 완료")
+
+    def _on_unseen_filter_toggled(self, checked: bool):
+        self.show_unseen_only = checked
+        self._apply_unseen_filter()
+
+    def _apply_unseen_filter(self):
+        """6.3.4 "안 본 페이지만 보기": 켜져 있으면 이미 검토완료(스크롤로 본 적
+        있음)된 페이지의 항목 행을 숨겨서 미검토 페이지만 순서대로 보이게 함.
+        페이지가 검토완료로 바뀔 때마다(_refresh_page_buttons에서) 다시 호출되므로,
+        필터를 켠 채로 스크롤하며 검토를 진행하면 본 페이지가 자동으로 목록에서
+        빠지고 다음 미검토 페이지만 남는다."""
+        if not self.row_widgets:
+            return
+        for cb, f in self.checkboxes:
+            page = self.finding_page.get(id(f))
+            hidden = self.show_unseen_only and bool(self.page_reviewed.get(page))
+            widget = self.row_widgets.get(id(f))
+            if widget is not None:
+                widget.setVisible(not hidden)
 
     def _jump_to_page(self, page_index: int):
         # "진행바 클릭 시 해당 페이지로 즉시 이동" -- 그 페이지의 첫 항목으로 스크롤.
@@ -380,14 +446,18 @@ class ReviewWindow(QDialog):
     def _add_row(self, f: Finding):
         """초기 구성 때 목록 맨 끝에 항목을 추가."""
         cb = self._make_checkbox(f)
-        self.inner_layout.addWidget(self._make_row_widget(cb, f))
+        row_widget = self._make_row_widget(cb, f)
+        self.inner_layout.addWidget(row_widget)
         self.checkboxes.append((cb, f))
+        self.row_widgets[id(f)] = row_widget
 
     def _add_row_before_stretch(self, f: Finding):
         """구성이 끝난 뒤(우클릭 등으로) 동적으로 추가할 때, 맨 아래 stretch보다 위에 넣는다."""
         cb = self._make_checkbox(f)
-        self.inner_layout.insertWidget(self.inner_layout.count() - 1, self._make_row_widget(cb, f))
+        row_widget = self._make_row_widget(cb, f)
+        self.inner_layout.insertWidget(self.inner_layout.count() - 1, row_widget)
         self.checkboxes.append((cb, f))
+        self.row_widgets[id(f)] = row_widget
 
         # 새 항목도 페이지 진행바 배지에 반영 (동일 값 일괄 처리로 새로 찾은 위치일 수 있음)
         page_index = page_of(self.spans, f.start)
@@ -403,6 +473,37 @@ class ReviewWindow(QDialog):
 
     def _on_doc_type_changed(self, text: str):
         self.doc_type = text
+
+    # -- 6.2.1 "되돌리기" -------------------------------------------------
+    def _refresh_promotions_panel(self):
+        while self.promotions_layout.count():
+            item = self.promotions_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        promotions = dictionary_learning.get_recent_promotions()
+        self.promotions_widget.setVisible(bool(promotions))
+        if not promotions:
+            return
+
+        self.promotions_layout.addWidget(QLabel(
+            f"<b>최근 사전 자동학습 반영</b> (최근 {dictionary_learning.RECENT_DAYS}일, 잘못 반영됐으면 되돌릴 수 있습니다)"
+        ))
+        for p in promotions:
+            row = QHBoxLayout()
+            row.addWidget(QLabel(f"[{p.direction}] '{p.word}' — {p.promoted_at[:10]}"))
+            revert_btn = QPushButton("되돌리기")
+            revert_btn.clicked.connect(lambda _checked=False, word=p.word, direction=p.direction:
+                                        self._revert_promotion(word, direction))
+            row.addWidget(revert_btn)
+            row.addStretch()
+            self.promotions_layout.addLayout(row)
+
+    def _revert_promotion(self, word: str, direction: str):
+        dictionary_learning.revert_promotion(word, direction)
+        reload_dictionaries()  # 되돌린 사전이 이 문서의 남은 검토에도 바로 반영되도록
+        self.status_label.setText(f"[사전 자동학습] '{word}' ({direction}) 반영을 되돌렸습니다.")
+        self._refresh_promotions_panel()
 
     def _show_context_menu(self, cb: QCheckBox, f: Finding, pos):
         # 6.3.3: 문서 전체에서 같은 문자열이 몇 곳에 더 있는지 찾아 일괄 선택/해제 제공.
@@ -458,6 +559,7 @@ class ReviewWindow(QDialog):
                 if dictionary_learning.record_candidate(f.value[0], "이름후보"):
                     reload_dictionaries()
                     self.status_label.setText(f"[사전 자동학습] '{f.value[0]}' 성씨 후보로 반영했습니다.")
+                    self._refresh_promotions_panel()  # 방금 반영된 항목도 되돌리기 목록에 바로 반영
 
     # -- 6.3.2 ① 승인 전 원본-마스킹본 미리보기 비교 -------------------------
     def _is_checked(self, f: Finding) -> bool:
@@ -525,6 +627,7 @@ def run_review(
     _auto_approve_after_ms: int | None = None,
     retry_notice: str | None = None, highlight_spans: set[tuple[int, int]] | None = None,
     page_sizes: list[tuple[float, float]] | None = None,
+    warning_pages: set[int] | None = None,
 ) -> ReviewResult | None:
     """검토 화면을 띄우고, 승인되면 approved 플래그가 반영된 findings와 선택한
     문서 유형을 ReviewResult로, 취소/닫힘이면 None을 반환.
@@ -541,10 +644,13 @@ def run_review(
     main.py가 넘겨주는 안내 문구와 "안 지워진" 항목의 (start, end) 위치.
     page_sizes: 6.2.2 템플릿 지문 기록에 필요한 페이지별 (width, height).
     비어 있으면(테스트 등) 지문 기록은 조용히 건너뜀.
+    warning_pages: 6.3.4 진행바 경고 색 강조에 쓰일, 회전된 텍스트/숨겨진
+    콘텐츠가 있는 페이지 번호(0-based) 집합. main.py가 마스킹 이전에
+    masker.rotated_text_pages()/hidden_content_pages()로 미리 계산해서 넘김.
     """
     app = QApplication.instance() or QApplication([])
     window = ReviewWindow(filename, findings, full_text, spans, total_pages, input_path,
-                           retry_notice, highlight_spans, page_sizes)
+                           retry_notice, highlight_spans, page_sizes, warning_pages)
     if _auto_approve_after_ms is not None:
         from PySide6.QtCore import QTimer
 

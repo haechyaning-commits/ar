@@ -55,16 +55,26 @@
   기록(`template_fingerprint.record_template`) -- 사전 자동학습(6.2.1)과 같은
   결로, 검토자가 이미 하는 승인 행동만으로 조용히 축적되고 별도 확인을 묻지 않음
 - "승인" 버튼을 눌러야 다음 단계(마스킹)로 넘어감
+- 실사용자 편의 기능(6.3.6): 항목마다 "🔍 확대" 버튼을 붙여 눌렀을 때 그 항목
+  주변만 실제 PDF에서 고배율로 다시 렌더링해 보여줌(원안의 "클릭 시 자동 확대"를
+  이 UI 구조 -- 체크박스 목록이라 항목 클릭 자체는 이미 체크 토글에 쓰이므로,
+  같은 클릭에 확대까지 얹지 않고 별도 버튼으로 분리 -- 에 맞게 재현). "다음
+  미확정 항목" 버튼/단축키(Ctrl+J)는 확신도가 "높음"이 아닌(=6.3.5 저신뢰
+  정렬 대상) 항목만 순서대로 스크롤+포커스 이동, 정규식으로 확실히 잡히는
+  항목(전화번호 등)은 건너뜀
 
-MVP 범위: 사이드바 항목 점프, 단축키, 실행취소(Undo) 등은 향후 확장으로 남겨두고
-"전체승인 + 예외 해제" + "저신뢰 우선 정렬" + "동일 값 일괄 처리" + "페이지 단위
-진행 상태 표시" + "수동 추가" + "문서 유형 선택"까지 구현.
+MVP 범위: 실행취소(Undo) 등은 향후 확장으로 남겨두고 "전체승인 + 예외 해제" +
+"저신뢰 우선 정렬" + "동일 값 일괄 처리" + "페이지 단위 진행 상태 표시" +
+"수동 추가" + "문서 유형 선택" + "미리보기 비교" + "항목 확대/다음 미확정 항목
+순회"까지 구현.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+import fitz  # PyMuPDF
 from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtGui import QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QMenu,
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
@@ -76,7 +86,48 @@ import template_fingerprint
 from detector import CONFIDENCE_LEVELS, Finding, find_occurrences, reload_dictionaries
 from output import DOCUMENT_TYPES
 from page_viewer import PageViewerDialog
-from pdf_extract import SpanRef, page_of
+from pdf_extract import SpanRef, page_of, rects_for_range
+
+# 6.3.6 "항목 클릭 시 자동 확대" -- 숫자 한두 자리 차이가 중요한 항목(주민번호 등)의
+# 오독을 줄이는 게 목적이므로 화면 표시(RENDER_SCALE=1.5)보다 훨씬 높은 배율로 다시 렌더링
+ZOOM_FACTOR = 4.0
+ZOOM_PADDING = 24.0  # PDF 좌표(pt) 기준 항목 주변 여백 -- 문맥이 조금 보여야 어떤 라벨인지 알 수 있음
+
+
+class _ZoomDialog(QDialog):
+    """6.3.6: 사이드바 항목을 확대해서 보여주는 팝업. 화면 표시용 저해상도
+    렌더링과 별개로, 이 항목의 위치만 clip해서 고배율로 새로 렌더링 -- 전체
+    페이지를 고배율로 그린 뒤 자르는 것보다 가볍고, PyMuPDF의 clip 인자가
+    바로 이 용도로 지원됨."""
+
+    def __init__(self, f: Finding, pdf_path: str, full_text: str, spans: list[SpanRef]):
+        super().__init__()
+        self.setWindowTitle(f"확대 보기 - [{f.type}] {f.value}")
+
+        layout = QVBoxLayout(self)
+        rects = rects_for_range(full_text, spans, f.start, f.end) if pdf_path else []
+        if not rects or full_text[f.start:f.end] != f.value:
+            layout.addWidget(QLabel("이 항목의 위치를 찾을 수 없습니다."))
+        else:
+            doc = fitz.open(pdf_path)
+            page_index = rects[0].page_index
+            page = doc[page_index]
+            x0 = min(r.rect[0] for r in rects) - ZOOM_PADDING
+            y0 = min(r.rect[1] for r in rects) - ZOOM_PADDING
+            x1 = max(r.rect[2] for r in rects) + ZOOM_PADDING
+            y1 = max(r.rect[3] for r in rects) + ZOOM_PADDING
+            clip = fitz.Rect(max(x0, 0), max(y0, 0), min(x1, page.rect.width), min(y1, page.rect.height))
+            pix = page.get_pixmap(matrix=fitz.Matrix(ZOOM_FACTOR, ZOOM_FACTOR), clip=clip)
+            img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888)
+            image_label = QLabel()
+            image_label.setPixmap(QPixmap.fromImage(img.copy()))
+            layout.addWidget(QLabel(f"페이지 {page_index + 1} — [{f.type}] {f.value}"))
+            layout.addWidget(image_label)
+            doc.close()
+
+        close_btn = QPushButton("닫기")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
 
 
 class ReviewWindow(QDialog):
@@ -171,6 +222,10 @@ class ReviewWindow(QDialog):
         deselect_all.clicked.connect(lambda: self._set_all(False))
         btn_row.addWidget(select_all)
         btn_row.addWidget(deselect_all)
+        next_low_confidence = QPushButton("다음 미확정 항목 (Ctrl+J)")
+        next_low_confidence.setShortcut(QKeySequence("Ctrl+J"))
+        next_low_confidence.clicked.connect(self._jump_to_next_low_confidence)
+        btn_row.addWidget(next_low_confidence)
         if self.input_path:
             manual_add = QPushButton("직접 추가 (드래그·클릭·텍스트)")
             manual_add.clicked.connect(self._open_manual_add)
@@ -287,16 +342,51 @@ class ReviewWindow(QDialog):
         cb.toggled.connect(self._on_checkbox_toggled)  # 6.3.2 ①: 열려있는 미리보기 비교 창을 실시간 갱신
         return cb
 
+    def _make_row_widget(self, cb: QCheckBox, f: Finding) -> QWidget:
+        """6.3.6: input_path가 있으면(원본을 다시 열 수 있으면) 체크박스 옆에
+        "🔍 확대" 버튼을 붙인 행을 만든다 -- 체크박스 클릭 자체는 이미 토글에
+        쓰이므로, 확대는 같은 클릭이 아니라 별도 버튼으로 분리."""
+        if not self.input_path:
+            return cb
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.addWidget(cb, 1)
+        zoom_btn = QPushButton("🔍 확대")
+        zoom_btn.setFixedWidth(70)
+        zoom_btn.clicked.connect(lambda _checked=False, finding=f: self._show_zoomed_view(finding))
+        row_layout.addWidget(zoom_btn)
+        return row
+
+    def _show_zoomed_view(self, f: Finding):
+        _ZoomDialog(f, self.input_path, self.full_text, self.spans).exec()
+
+    def _jump_to_next_low_confidence(self):
+        """6.3.6 "다음 미확정 항목" 순회: 확신도가 "높음"(정규식 등으로 이미
+        확실한 항목)이 아닌 것만 순서대로 스크롤+포커스 이동. 별도 커서를 두지
+        않고 "지금 포커스된 체크박스"를 기준으로 다음 후보를 찾음 -- 수동 추가
+        등으로 목록이 중간에 늘어나도 매번 현재 화면 상태 기준으로 다시 계산되므로
+        어긋나지 않음."""
+        candidates = [cb for cb, f in self.checkboxes if f.confidence != "높음"]
+        if not candidates:
+            self.status_label.setText("확인이 필요한(확신도 낮음/중간) 항목이 없습니다.")
+            return
+        current = self.focusWidget()  # 이 창 자체의 포커스 체인 -- 앱 전역(QApplication.focusWidget())보다 안정적
+        start_idx = (candidates.index(current) + 1) % len(candidates) if current in candidates else 0
+        target = candidates[start_idx]
+        self.scroll.ensureWidgetVisible(target)
+        target.setFocus()
+
     def _add_row(self, f: Finding):
         """초기 구성 때 목록 맨 끝에 항목을 추가."""
         cb = self._make_checkbox(f)
-        self.inner_layout.addWidget(cb)
+        self.inner_layout.addWidget(self._make_row_widget(cb, f))
         self.checkboxes.append((cb, f))
 
     def _add_row_before_stretch(self, f: Finding):
         """구성이 끝난 뒤(우클릭 등으로) 동적으로 추가할 때, 맨 아래 stretch보다 위에 넣는다."""
         cb = self._make_checkbox(f)
-        self.inner_layout.insertWidget(self.inner_layout.count() - 1, cb)
+        self.inner_layout.insertWidget(self.inner_layout.count() - 1, self._make_row_widget(cb, f))
         self.checkboxes.append((cb, f))
 
         # 새 항목도 페이지 진행바 배지에 반영 (동일 값 일괄 처리로 새로 찾은 위치일 수 있음)

@@ -20,10 +20,13 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton
 
 import dictionary_learning
+import template_fingerprint
 import main as main_module
 
 # 6.2.1 사전 자동학습이 실제 mvp/data/ 사전을 반복 테스트로 오염시키지 않도록 격리
 dictionary_learning.DEFAULT_DATA_DIR = Path(tempfile.mkdtemp(prefix="dict_learning_test_"))
+# 6.2.2 템플릿 지문도 마찬가지로 실제 mvp/data/template_fingerprints.json을 건드리지 않도록 격리
+template_fingerprint.DEFAULT_DATA_DIR = Path(tempfile.mkdtemp(prefix="template_fp_test_"))
 
 _FAILURES: list[str] = []
 
@@ -70,9 +73,12 @@ def test_end_to_end_via_real_clicks():
     # 응답할 사람이 없어 그대로 두면 멈춘다 -- 테스트 전용 훅으로 자동 응답.
     # _auto_reprocess_confirm: 이번 실행은 새 파일이라 재실행 확인창 자체가 뜨지
     # 않지만, 다른 테스트가 이 워크스페이스를 재사용하게 되는 경우를 대비해 방어적으로 지정.
+    # _auto_open_comparison: 6.3.2 ② 비교 뷰를 열지 물어보는 QMessageBox도 같은 이유로
+    # 헤드리스에서는 자동 응답 필요 -- False로 지정해 이 테스트에서는 열지 않음.
     rc = main_module.process_file(str(src), str(workspace),
                                    _auto_processor_name="테스트담당자",
-                                   _auto_reprocess_confirm=True)
+                                   _auto_reprocess_confirm=True,
+                                   _auto_open_comparison=False)
 
     check("반환 코드 0(성공)", rc == 0, str(rc))
 

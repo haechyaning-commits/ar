@@ -21,6 +21,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QPushButton
 
 import dictionary_learning
+import template_fingerprint
 from detector import detect_all
 from review_ui import ReviewWindow
 
@@ -28,6 +29,8 @@ from review_ui import ReviewWindow
 # mvp/data/의 진짜 사전(surnames.txt/exclude_words.txt)이 반복 테스트 실행으로
 # 오염되지 않도록 이 테스트 세션 동안은 임시 폴더로 격리한다.
 dictionary_learning.DEFAULT_DATA_DIR = Path(tempfile.mkdtemp(prefix="dict_learning_test_"))
+# 6.2.2 템플릿 지문도 승인 클릭마다 기록되므로 마찬가지로 격리
+template_fingerprint.DEFAULT_DATA_DIR = Path(tempfile.mkdtemp(prefix="template_fp_test_"))
 
 SAMPLE = (
     "지출결의서\n"

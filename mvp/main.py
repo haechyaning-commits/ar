@@ -22,8 +22,10 @@ from pathlib import Path
 import fitz  # PyMuPDF
 from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox
 
+import compare_view
+import template_fingerprint
 from detector import detect_all
-from pdf_extract import extract_text_and_spans
+from pdf_extract import extract_text_and_spans, page_sizes
 from pipeline import process_atomic
 from review_ui import run_review
 import output
@@ -32,7 +34,8 @@ import output
 def process_file(input_path: str, workspace_dir: str | None = None,
                   _auto_approve_after_ms: int | None = None,
                   _auto_processor_name: str | None = None,
-                  _auto_reprocess_confirm: bool | None = None) -> int:
+                  _auto_reprocess_confirm: bool | None = None,
+                  _auto_open_comparison: bool | None = None) -> int:
     """반환값: 0=성공, 1=탐지 없음(그대로 종료), 2=검토 취소,
     3=자체검증 실패(헤드리스 모드에서만 -- 대화형에서는 검토 화면으로 복귀함),
     4=재실행 확인에서 취소, 5=원본이동/마커/로그/리포트 커밋 실패(원본 무변경, 롤백됨),
@@ -44,6 +47,10 @@ def process_file(input_path: str, workspace_dir: str | None = None,
     _auto_processor_name / _auto_reprocess_confirm: 실사용에서는 쓰지 않음.
     화면이 없는 환경(headless)에서 통합 테스트할 때, 사용자 입력을 기다리는
     다이얼로그(처리자 이름 입력/재실행 확인)를 자동 응답으로 대체하기 위한 테스트 전용 훅.
+    _auto_open_comparison: 6.3.2 ② 비교 뷰를 열지 물어보는 QMessageBox를 헤드리스
+    환경에서 대신 응답하는 테스트 전용 훅(다른 `_auto_*` 인자들과 동일한 관례) --
+    지정하면 그 값을 답으로 쓰고 실제 대화상자는 띄우지 않음, 생략(None)하면
+    실제로 사용자에게 물어봄.
     """
     src = Path(input_path).resolve()
     workspace = Path(workspace_dir) if workspace_dir else output.app_base_dir()
@@ -72,10 +79,15 @@ def process_file(input_path: str, workspace_dir: str | None = None,
     # masker.py도 같은 방식(pdf_extract)으로 다시 추출해 findings의 start/end를
     # 실제 좌표로 되찾으므로, 탐지 쪽도 반드시 이 함수를 써야 오프셋이 어긋나지 않음
     full_text, spans = extract_text_and_spans(doc)
+    sizes = page_sizes(doc)
     total_pages = doc.page_count
     doc.close()
 
     findings = detect_all(full_text)
+    # 6.2.2: 저장된 템플릿 지문 중 이 문서와 양식이 일치하는 게 있으면, 탐지
+    # 엔진이 이번엔 놓친 위치를 우선 확인 후보로 추가 (탐지가 0건이어도 템플릿
+    # 지문만으로 후보가 나올 수 있음 -- 그래서 detect_all 결과와 무관하게 항상 시도)
+    findings += template_fingerprint.suggest_candidates(full_text, spans, sizes, findings)
     if not findings:
         print(f"[{src.name}] 탐지된 개인정보가 없습니다.")
         return 1
@@ -100,7 +112,8 @@ def process_file(input_path: str, workspace_dir: str | None = None,
     while True:
         reviewed = run_review(src.name, findings, full_text, spans, total_pages, str(src),
                                _auto_approve_after_ms=_auto_approve_after_ms,
-                               retry_notice=retry_notice, highlight_spans=highlight_spans)
+                               retry_notice=retry_notice, highlight_spans=highlight_spans,
+                               page_sizes=sizes)
         if reviewed is None:
             print(f"[{src.name}] 검토가 취소되었습니다. 처리하지 않음.")
             return 2
@@ -136,6 +149,23 @@ def process_file(input_path: str, workspace_dir: str | None = None,
         print("  ⚠ 회전된 텍스트가 있습니다. 자동 탐지가 놓쳤을 수 있으니 육안으로 재확인하세요.")
     if result.hidden_content_warning:
         print("  ⚠ 주석/폼필드/첨부파일 등 숨겨진 콘텐츠가 있습니다. 별도 확인이 필요합니다.")
+
+    # 6.3.2 ②: 처리 이력 조회 UI(설계서 11번, 미구현)가 아직 없으므로, 이 MVP
+    # 범위에서는 처리 성공 직후 물어보는 방식으로 원본-마스킹본 비교를 연결.
+    # _auto_processor_name/_auto_reprocess_confirm과 같은 관례: 헤드리스 테스트가
+    # _auto_open_comparison을 명시하면 그 값을 그대로 답으로 쓰고, 생략하면(None)
+    # 실제 대화형 사용이라고 보고 진짜 QMessageBox로 물어봄.
+    if _auto_open_comparison is not None:
+        open_comparison = _auto_open_comparison
+    else:
+        reply = QMessageBox.question(
+            None, "결과 비교",
+            "처리가 완료되었습니다. 원본과 결과물을 나란히 비교해서 확인하시겠습니까?\n"
+            "(⚠ 원본_보관/의 원본 파일을 다시 엽니다 — 개인정보를 포함하고 있습니다)",
+        )
+        open_comparison = reply == QMessageBox.StandardButton.Yes
+    if open_comparison:
+        compare_view.open_result_comparison(result.original_moved_to, result.output_path)
 
     return 0
 

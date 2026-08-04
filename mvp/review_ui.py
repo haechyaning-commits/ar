@@ -22,8 +22,14 @@
   채움). 승인 시점에 아직 화면에 스크롤되어 보인 적 없는 페이지가 있으면 경고를
   띄우고 승인을 차단. 진행바의 페이지 버튼은 클릭하면 해당 페이지의 첫 항목으로
   점프하는 용도로만 쓰고(눌러야 검토완료 처리되는 게 아님), 배지로 페이지별
-  탐지 건수를 보여줌. "안 본 페이지만 보기" 필터·경고 페이지 색 강조는 아직
-  미구현(향후 확장).
+  탐지 건수를 보여줌. **경고 페이지 색 강조**: main.py가 마스킹 이전(검토 화면을
+  띄우기 전)에 `masker.rotated_text_pages()`/`hidden_content_pages()`로 미리
+  페이지 단위 경고 목록을 계산해 넘겨주면, 그 페이지 버튼에 주황 테두리 +
+  "⚠" 표시를 붙임 — 검토완료(초록 배경)와는 독립적인 축이라, 이미 스크롤해서
+  본 페이지도 "자동 탐지가 놓쳤을 수 있다"는 경고는 계속 남아있음. **"안 본
+  페이지만 보기" 필터**: 체크하면 이미 검토완료된 페이지의 항목 행을 숨겨
+  미검토 페이지 항목만 순서대로 보여주고, 스크롤로 새 페이지가 검토완료될
+  때마다 그 페이지도 자동으로 목록에서 빠짐.
 - 수동 추가 (6.3.1): "직접 추가" 버튼을 누르면 page_viewer.PageViewerDialog가
   뜸 -- PDF 페이지를 이미지로 렌더링해서 보여주고, 드래그(영역 지정)/클릭(단어
   하나)/텍스트 직접 입력(문서 전체 검색, 6.3.3과 같은 find_occurrences 재사용)
@@ -142,6 +148,7 @@ class ReviewWindow(QDialog):
         spans: list[SpanRef] | None = None, total_pages: int = 1, input_path: str = "",
         retry_notice: str | None = None, highlight_spans: set[tuple[int, int]] | None = None,
         page_sizes: list[tuple[float, float]] | None = None,
+        warning_pages: set[int] | None = None,
     ):
         super().__init__()
         self.setWindowTitle(f"검토 - {filename}")
@@ -154,11 +161,14 @@ class ReviewWindow(QDialog):
         self.input_path = input_path
         self.highlight_spans = highlight_spans or set()
         self.page_sizes = page_sizes or []
+        self.warning_pages = warning_pages or set()
         self.checkboxes: list[tuple[QCheckBox, Finding]] = []
+        self.row_widgets: dict[int, QWidget] = {}  # id(finding) -> inner_layout에 실제로 들어간 행 위젯
         self.finding_page: dict[int, int] = {}  # id(finding) -> page_index
         self.page_buttons: dict[int, QPushButton] = {}
         self.page_counts: dict[int, int] = {}
         self.page_reviewed: dict[int, bool] = {}  # 스크롤로 실제 화면에 보인 적 있는 페이지
+        self.show_unseen_only: bool = False  # 6.3.4 "안 본 페이지만 보기" 필터
         self.approved_result: bool | None = None  # None=닫힘/취소, True=승인
         self.doc_type: str = DOCUMENT_TYPES[0]
         self._preview_dialog: compare_view.PreviewCompareDialog | None = None  # 6.3.2 ①
@@ -279,29 +289,67 @@ class ReviewWindow(QDialog):
             self.page_reviewed[page_index] = False
             btn = QPushButton(self._page_button_text(page_index))
             btn.setFixedWidth(44)
-            btn.setToolTip(f"페이지 {page_index + 1}로 이동 (스크롤해서 보면 자동으로 검토완료 표시됨)")
+            tooltip = f"페이지 {page_index + 1}로 이동 (스크롤해서 보면 자동으로 검토완료 표시됨)"
+            if page_index in self.warning_pages:
+                tooltip += " — ⚠ 회전된 텍스트/숨겨진 콘텐츠가 있어 자동 탐지가 놓쳤을 수 있으니 육안으로 재확인하세요."
+            btn.setToolTip(tooltip)
             btn.clicked.connect(lambda _checked=False, p=page_index: self._jump_to_page(p))
             self.page_buttons[page_index] = btn
             row.addWidget(btn)
+        row.addSpacing(8)
+        # QCheckBox가 아니라 체크 가능한 QPushButton으로 만듦 -- 실제 탐지
+        # 항목의 체크박스와 위젯 타입이 섞이면 findChildren(QCheckBox) 같은
+        # 일반적인 탐색이 이 필터 토글까지 "항목 체크박스"로 잘못 집어낼 수 있음
+        self.unseen_only_toggle = QPushButton("안 본 페이지만 보기")
+        self.unseen_only_toggle.setCheckable(True)
+        self.unseen_only_toggle.toggled.connect(self._on_unseen_filter_toggled)
+        row.addWidget(self.unseen_only_toggle)
         row.addStretch()
         self._refresh_page_buttons()
         return row
 
     def _page_button_text(self, page_index: int) -> str:
         count = self.page_counts.get(page_index, 0)
-        return f"{page_index + 1}\n({count}건)" if count else f"{page_index + 1}"
+        label = f"{page_index + 1}⚠" if page_index in self.warning_pages else f"{page_index + 1}"
+        return f"{label}\n({count}건)" if count else label
 
     def _refresh_page_buttons(self):
         for page_index, btn in self.page_buttons.items():
             btn.setText(self._page_button_text(page_index))
-            btn.setStyleSheet("background-color: #b7e3b7;" if self.page_reviewed.get(page_index) else "")
+            # 배경색은 검토완료 여부(초록), 테두리는 경고 페이지 여부(주황)를 각각
+            # 독립적으로 표시 -- 검토를 마쳤어도 회전텍스트/숨김콘텐츠 경고는
+            # "자동 탐지가 놓쳤을 수 있다"는 별개의 위험이라 계속 눈에 띄어야 함
+            style = "background-color: #b7e3b7;" if self.page_reviewed.get(page_index) else ""
+            if page_index in self.warning_pages:
+                style += "border: 2px solid #e69500;"
+            btn.setStyleSheet(style)
         self._update_progress_label()
+        self._apply_unseen_filter()
 
     def _update_progress_label(self):
         done = sum(1 for v in self.page_reviewed.values() if v)
         total = len(self.page_reviewed)
         bar = "■" * done + "□" * (total - done)
         self.progress_label.setText(f"[{bar}]  {done} / {total} 페이지 검토 완료")
+
+    def _on_unseen_filter_toggled(self, checked: bool):
+        self.show_unseen_only = checked
+        self._apply_unseen_filter()
+
+    def _apply_unseen_filter(self):
+        """6.3.4 "안 본 페이지만 보기": 켜져 있으면 이미 검토완료(스크롤로 본 적
+        있음)된 페이지의 항목 행을 숨겨서 미검토 페이지만 순서대로 보이게 함.
+        페이지가 검토완료로 바뀔 때마다(_refresh_page_buttons에서) 다시 호출되므로,
+        필터를 켠 채로 스크롤하며 검토를 진행하면 본 페이지가 자동으로 목록에서
+        빠지고 다음 미검토 페이지만 남는다."""
+        if not self.row_widgets:
+            return
+        for cb, f in self.checkboxes:
+            page = self.finding_page.get(id(f))
+            hidden = self.show_unseen_only and bool(self.page_reviewed.get(page))
+            widget = self.row_widgets.get(id(f))
+            if widget is not None:
+                widget.setVisible(not hidden)
 
     def _jump_to_page(self, page_index: int):
         # "진행바 클릭 시 해당 페이지로 즉시 이동" -- 그 페이지의 첫 항목으로 스크롤.
@@ -398,14 +446,18 @@ class ReviewWindow(QDialog):
     def _add_row(self, f: Finding):
         """초기 구성 때 목록 맨 끝에 항목을 추가."""
         cb = self._make_checkbox(f)
-        self.inner_layout.addWidget(self._make_row_widget(cb, f))
+        row_widget = self._make_row_widget(cb, f)
+        self.inner_layout.addWidget(row_widget)
         self.checkboxes.append((cb, f))
+        self.row_widgets[id(f)] = row_widget
 
     def _add_row_before_stretch(self, f: Finding):
         """구성이 끝난 뒤(우클릭 등으로) 동적으로 추가할 때, 맨 아래 stretch보다 위에 넣는다."""
         cb = self._make_checkbox(f)
-        self.inner_layout.insertWidget(self.inner_layout.count() - 1, self._make_row_widget(cb, f))
+        row_widget = self._make_row_widget(cb, f)
+        self.inner_layout.insertWidget(self.inner_layout.count() - 1, row_widget)
         self.checkboxes.append((cb, f))
+        self.row_widgets[id(f)] = row_widget
 
         # 새 항목도 페이지 진행바 배지에 반영 (동일 값 일괄 처리로 새로 찾은 위치일 수 있음)
         page_index = page_of(self.spans, f.start)
@@ -575,6 +627,7 @@ def run_review(
     _auto_approve_after_ms: int | None = None,
     retry_notice: str | None = None, highlight_spans: set[tuple[int, int]] | None = None,
     page_sizes: list[tuple[float, float]] | None = None,
+    warning_pages: set[int] | None = None,
 ) -> ReviewResult | None:
     """검토 화면을 띄우고, 승인되면 approved 플래그가 반영된 findings와 선택한
     문서 유형을 ReviewResult로, 취소/닫힘이면 None을 반환.
@@ -591,10 +644,13 @@ def run_review(
     main.py가 넘겨주는 안내 문구와 "안 지워진" 항목의 (start, end) 위치.
     page_sizes: 6.2.2 템플릿 지문 기록에 필요한 페이지별 (width, height).
     비어 있으면(테스트 등) 지문 기록은 조용히 건너뜀.
+    warning_pages: 6.3.4 진행바 경고 색 강조에 쓰일, 회전된 텍스트/숨겨진
+    콘텐츠가 있는 페이지 번호(0-based) 집합. main.py가 마스킹 이전에
+    masker.rotated_text_pages()/hidden_content_pages()로 미리 계산해서 넘김.
     """
     app = QApplication.instance() or QApplication([])
     window = ReviewWindow(filename, findings, full_text, spans, total_pages, input_path,
-                           retry_notice, highlight_spans, page_sizes)
+                           retry_notice, highlight_spans, page_sizes, warning_pages)
     if _auto_approve_after_ms is not None:
         from PySide6.QtCore import QTimer
 

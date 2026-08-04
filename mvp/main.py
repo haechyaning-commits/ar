@@ -25,6 +25,7 @@ from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox
 import compare_view
 import template_fingerprint
 from detector import detect_all
+from masker import hidden_content_pages, rotated_text_pages
 from pdf_extract import extract_text_and_spans, page_sizes
 from pipeline import process_atomic
 from review_ui import run_review
@@ -81,6 +82,11 @@ def process_file(input_path: str, workspace_dir: str | None = None,
     full_text, spans = extract_text_and_spans(doc)
     sizes = page_sizes(doc)
     total_pages = doc.page_count
+    # 6.3.4 경고 페이지 색 강조: 실제 리댁션(masker.mask_pdf)이 하기 전, 검토
+    # 화면을 띄우기 전에 미리 알아야 진행바에 표시할 수 있음 -- 마스킹 이후에나
+    # 계산되던 rotated_text_warning/hidden_content_warning과 같은 판정 로직을
+    # 여기서도 재사용(페이지 단위로).
+    warning_pages = rotated_text_pages(doc) | hidden_content_pages(doc)
     doc.close()
 
     findings = detect_all(full_text)
@@ -113,7 +119,7 @@ def process_file(input_path: str, workspace_dir: str | None = None,
         reviewed = run_review(src.name, findings, full_text, spans, total_pages, str(src),
                                _auto_approve_after_ms=_auto_approve_after_ms,
                                retry_notice=retry_notice, highlight_spans=highlight_spans,
-                               page_sizes=sizes)
+                               page_sizes=sizes, warning_pages=warning_pages)
         if reviewed is None:
             print(f"[{src.name}] 검토가 취소되었습니다. 처리하지 않음.")
             return 2

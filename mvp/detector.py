@@ -314,9 +314,16 @@ def apply_cross_validation(text: str, findings: list[Finding]) -> list[Finding]:
     return findings
 
 
-def find_occurrences(text: str, value: str) -> list[tuple[int, int]]:
+def find_occurrences(text: str, value: str, loose: bool = False) -> list[tuple[int, int]]:
     """text 안에서 value가 나타나는 모든 위치의 (start, end)를 전부 찾는다
-    (완전일치만, 9번 표 "부분일치 옵션"은 오탐 위험 때문에 기본값에서 제외).
+    (기본값은 완전일치. 11번 "텍스트 입력 검색 시 부분일치 옵션"이 요구하는
+    느슨한 매칭은 loose=True일 때만 적용 -- 오탐 위험이 올라가므로 검토자가
+    명시적으로 옵션을 켰을 때만 동작하고, 기본값은 그대로 완전일치).
+
+    loose=True: 문자 사이에 공백/줄바꿈이 섞여 들어가도 같은 값으로 인정한다
+    (예: PDF 텍스트 추출 시 자간이 넓어 "김 철수"처럼 공백이 끼는 표기 변형
+    대응). 글자 순서 자체가 바뀌거나 다른 글자가 끼어드는 것까지는 허용하지
+    않음 -- 그 이상은 오탐 위험이 감당하기 어려울 만큼 커짐(설계서 11번).
 
     6.3.1(수동 추가 - 텍스트 직접 입력)과 6.3.3(동일 값 일괄 처리)이 공유하는
     다중매칭 로직 -- 검토 화면에서 항목을 우클릭했을 때 문서 내 같은 문자열이
@@ -324,6 +331,9 @@ def find_occurrences(text: str, value: str) -> list[tuple[int, int]]:
     """
     if not value:
         return []
+    if loose:
+        pattern = re.compile(r"\s*".join(re.escape(ch) for ch in value))
+        return [(m.start(), m.end()) for m in pattern.finditer(text)]
     out = []
     start = 0
     while (idx := text.find(value, start)) != -1:

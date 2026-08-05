@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from detector import detect_all, _rrn_checksum_valid, PASSPORT_RE, PHONE_RE
+from detector import detect_all, find_occurrences, _rrn_checksum_valid, PASSPORT_RE, PHONE_RE
 
 _FAILURES: list[str] = []
 
@@ -158,6 +158,31 @@ def test_duplicate_name_occurrences_both_flagged():
     check("두 항목의 위치(span)가 서로 다름", findings[0].start != findings[1].start)
 
 
+def test_find_occurrences_exact_match_default():
+    print("test_find_occurrences_exact_match_default")
+    text = "신청인: 김철수\n비고: 김 철수 확인 요망"
+    exact_span = (text.index("김철수"), text.index("김철수") + len("김철수"))
+    check("기본값(완전일치)은 공백이 낀 표기 변형을 찾지 못하고 정확히 일치하는 곳만 찾음",
+          find_occurrences(text, "김철수") == [exact_span], str(find_occurrences(text, "김철수")))
+
+
+def test_find_occurrences_loose_match_ignores_inner_whitespace():
+    print("test_find_occurrences_loose_match_ignores_inner_whitespace")
+    text = "신청인: 김철수\n비고: 김  철수 확인 요망\n담당: 최영희"
+    occurrences = find_occurrences(text, "김철수", loose=True)
+    matched_texts = [text[s:e] for s, e in occurrences]
+    check("부분일치 옵션은 완전일치 값도 그대로 포함", "김철수" in matched_texts, str(matched_texts))
+    check("공백이 섞인 표기 변형('김  철수')도 찾아냄", "김  철수" in matched_texts, str(matched_texts))
+    check("전혀 다른 이름(최영희)은 걸리지 않음", not any("최영희" in t for t in matched_texts), str(matched_texts))
+
+
+def test_find_occurrences_loose_match_does_not_allow_reordering():
+    print("test_find_occurrences_loose_match_does_not_allow_reordering")
+    text = "수철김 (순서가 다른 글자, 매칭되면 안 됨)"
+    check("부분일치도 글자 순서가 바뀐 것까지는 허용하지 않음(오탐 위험 제한)",
+          find_occurrences(text, "김철수", loose=True) == [])
+
+
 def main():
     tests = [
         test_rrn_checksum,
@@ -171,6 +196,9 @@ def main():
         test_business_title_pattern_no_space_before_title,
         test_address_region_alone_not_flagged,
         test_duplicate_name_occurrences_both_flagged,
+        test_find_occurrences_exact_match_default,
+        test_find_occurrences_loose_match_ignores_inner_whitespace,
+        test_find_occurrences_loose_match_does_not_allow_reordering,
     ]
     for t in tests:
         t()

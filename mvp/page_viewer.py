@@ -4,7 +4,9 @@
 
 - 드래그: 화면에서 영역을 직접 지정 (파란 사각형으로 미리보기)
 - 클릭: 단어 하나를 빠르게 지정 (거의 움직이지 않은 드래그를 클릭으로 취급)
-- 텍스트 직접 입력: 문서 전체에서 완전일치 검색(detector.find_occurrences 재사용),
+- 텍스트 직접 입력: 문서 전체에서 검색(detector.find_occurrences 재사용, 기본값은
+  완전일치). "표기 변형 허용(부분일치)" 체크박스를 켜면 글자 사이 공백/줄바꿈
+  차이를 무시하고 찾음(11번, v13 신규 -- 오탐 위험 때문에 기본값은 여전히 완전일치).
   여러 곳에서 발견되면 검토자가 개별/전체 선택
 
 드래그/클릭 모두 페이지 이미지 위의 좌표를 pdf_extract.resolve_word_at/resolve_region으로
@@ -121,12 +123,18 @@ class PageViewerDialog(QDialog):
 
         search_row = QHBoxLayout()
         self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("찾을 문자열 입력 (완전일치, 문서 전체 검색)")
+        self.search_box.setPlaceholderText("찾을 문자열 입력 (문서 전체 검색)")
         search_btn = QPushButton("찾기")
         search_btn.clicked.connect(self._on_search)
         search_row.addWidget(self.search_box)
         search_row.addWidget(search_btn)
         layout.addLayout(search_row)
+
+        # 11번 "텍스트 입력 검색 시 부분일치 옵션" (v13 신규) -- 기본값은 여전히
+        # 완전일치(오탐 위험 때문에). 표기 변형(자간 공백 등)이 있을 만한 이름 등을
+        # 찾을 때만 검토자가 직접 켜서 쓰는 옵션.
+        self.loose_match_checkbox = QCheckBox("표기 변형 허용(부분일치) — 글자 사이 공백/줄바꿈 차이를 무시하고 찾음")
+        layout.addWidget(self.loose_match_checkbox)
 
         # 검색 결과(6.3.1의 "N곳에서 발견됨" 다중매칭 목록) -- 평소엔 숨겨둠
         self.search_results = QWidget()
@@ -244,29 +252,39 @@ class PageViewerDialog(QDialog):
         if not value:
             self.search_results.setVisible(False)
             return
-        occurrences = find_occurrences(self.full_text, value)
+        loose = self.loose_match_checkbox.isChecked()
+        occurrences = find_occurrences(self.full_text, value, loose=loose)
         if not occurrences:
             self.search_results.setVisible(True)
             self.search_results_layout.addWidget(QLabel(f"'{value}' 문서 내에서 찾지 못했습니다."))
             return
 
         self.search_results_layout.addWidget(QLabel(f"'{value}' — {len(occurrences)}곳에서 발견됨:"))
-        checkboxes: list[tuple[QCheckBox, tuple[int, int]]] = []
+        checkboxes: list[tuple[QCheckBox, tuple[int, int], str]] = []
         for start, end in occurrences:
+            # loose=True면 실제로 매칭된 구간(공백 포함 여부 등)이 입력한 문자열과
+            # 다를 수 있으므로, Finding.value는 항상 full_text[start:end] 원문
+            # 그대로 써야 한다(마스킹/자체검증이 이 값 기준으로 위치를 재확인함).
+            matched_text = self.full_text[start:end]
             page_index = page_of(self.spans, start)
             already = any(f.start == start and f.end == end for f in self.findings)
-            cb = QCheckBox(f"페이지 {page_index + 1} — {value}" + (" (이미 추가됨)" if already else ""))
+            label = f"페이지 {page_index + 1} — {matched_text!r}"
+            if matched_text != value:
+                label += " (표기 변형)"
+            if already:
+                label += " (이미 추가됨)"
+            cb = QCheckBox(label)
             cb.setChecked(not already)
             cb.setEnabled(not already)
             self.search_results_layout.addWidget(cb)
-            checkboxes.append((cb, (start, end)))
+            checkboxes.append((cb, (start, end), matched_text))
 
         add_btn = QPushButton("선택 항목 추가")
 
         def _confirm():
-            for cb, (start, end) in checkboxes:
+            for cb, (start, end), matched_text in checkboxes:
                 if cb.isChecked() and cb.isEnabled():
-                    self._add_finding(start, end, value, group="수동추가")
+                    self._add_finding(start, end, matched_text, group="수동추가")
             self.search_results.setVisible(False)
 
         add_btn.clicked.connect(_confirm)

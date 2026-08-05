@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import fitz
 
-from detector import detect_all
+from audit_log import format_source_breakdown
+from detector import Finding, detect_all
 from masker import mask_account, mask_card, mask_pdf, mask_rrn, has_rotated_text, has_hidden_content
 from pdf_extract import extract_text_and_spans
 
@@ -365,6 +366,50 @@ def test_rrn_masking_end_to_end_via_mask_pdf():
     check("바이트 레벨에서도 뒤 7자리가 안 남음(오버레이 아님 재확인)", b"1234568" not in raw)
 
 
+def test_source_breakdown_distinguishes_auto_and_manual():
+    """6.7 탐지 출처 구분 -- mask_pdf가 유형별로 자동탐지/수동추가 건수를
+    정확히 나눠서 MaskResult.source_breakdown에 담는지, 그리고
+    audit_log.format_source_breakdown이 설계서 예시 형식대로 출력하는지 확인."""
+    print("test_source_breakdown_distinguishes_auto_and_manual")
+    tmp = _new_tmp()
+    src = tmp / "출처구분.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    # detect_all은 NAME_LABELS/BUSINESS_LABELS/BUSINESS_TITLES 문맥에서만 이름을
+    # 잡으므로, 어느 라벨/직위도 없이 등장하는 이름은 자동탐지가 구조적으로
+    # 놓친다 -- 검토자가 review_ui의 수동 추가(6.3.1)로 채워 넣는 상황을 재현.
+    page.insert_text((72, 72), "신청인: 김테스트 (010-1234-5678)", fontsize=11, fontname="korea")
+    page.insert_text((72, 100), "비고란: 박담당 확인함", fontsize=11, fontname="korea")
+    doc.save(src)
+    doc.close()
+
+    doc = fitz.open(src)
+    full_text, _spans = extract_text_and_spans(doc)
+    doc.close()
+    findings = detect_all(full_text)
+    check("자동탐지는 '박담당'을 놓침(라벨 미지원, 이 테스트의 전제)",
+          not any(f.value == "박담당" for f in findings), str(findings))
+
+    manual_start = full_text.index("박담당")
+    manual = Finding("이름", "박담당", manual_start, manual_start + len("박담당"),
+                      group="수동추가", approved=True, confidence="낮음", source="수동")
+    findings.append(manual)
+
+    out = tmp / "출처구분_masked.pdf"
+    result = mask_pdf(str(src), findings, str(out))
+    check("자체 재검증 통과", result.success, str(result.leftover))
+    check("이름: 자동 1건 + 수동 1건으로 집계됨",
+          result.source_breakdown.get("이름") == {"자동": 1, "수동": 1},
+          str(result.source_breakdown))
+    check("전화번호: 자동 1건으로 집계됨",
+          result.source_breakdown.get("전화번호") == {"자동": 1},
+          str(result.source_breakdown))
+
+    formatted = format_source_breakdown(result.source_breakdown)
+    check("설계서 6.7 예시 형식대로 문자열 생성됨(자동이 수동보다 먼저)",
+          formatted == "이름 2건(자동 1, 수동 1), 전화번호 1건(자동)", formatted)
+
+
 def main():
     tests = [
         test_basic_roundtrip_byte_level_removal,
@@ -378,6 +423,7 @@ def main():
         test_account_card_masking_end_to_end_via_mask_pdf,
         test_rrn_masking_policy_confirmed,
         test_rrn_masking_end_to_end_via_mask_pdf,
+        test_source_breakdown_distinguishes_auto_and_manual,
     ]
     for t in tests:
         t()

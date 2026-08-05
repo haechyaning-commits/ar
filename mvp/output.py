@@ -20,6 +20,8 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 
+from audit_log import format_source_breakdown
+
 
 def app_base_dir() -> Path:
     """출력 폴더(원본_보관/마스킹완료/요약리포트/로그)의 기준 위치 (6.6).
@@ -144,6 +146,7 @@ def default_processor_name() -> str:
 def write_summary_report(
     reports_dir: Path, record: dict, masked_counts: dict[str, int],
     rotated_text_warning: bool = False, hidden_content_warning: bool = False,
+    source_breakdown: dict[str, dict[str, int]] | None = None,
 ) -> Path:
     """⚠ 회전텍스트/숨김콘텐츠 경고(6.5.1-2/4)는 audit_log.csv(6.7)에는 이미
     남고 있었지만, 이 리포트에는 빠져 있었다 -- 6.8의 목적이 "로그를 뒤지지
@@ -153,7 +156,17 @@ def write_summary_report(
     경고가 있을 때만 눈에 띄게 한 줄 추가한다."""
     stem = Path(record["결과물파일명"]).stem
     report_path = reports_dir / f"{stem}_요약.txt"
-    counts_lines = "\n".join(f"  - {k}: {v}건" for k, v in masked_counts.items()) or "  (없음)"
+    source_breakdown = source_breakdown or {}
+
+    def _count_line(type_name: str, count: int) -> str:
+        # 탐지 출처(자동/수동) 세부 내역이 있으면 함께 표시 (6.7 신규) --
+        # 로그 CSV를 열지 않아도 이 리포트 한 장으로 자동탐지가 놓친 만큼을
+        # 검토자가 직접 채운 건지 바로 보이게 함
+        if type_name in source_breakdown:
+            return f"  - {format_source_breakdown({type_name: source_breakdown[type_name]})}"
+        return f"  - {type_name}: {count}건"
+
+    counts_lines = "\n".join(_count_line(k, v) for k, v in masked_counts.items()) or "  (없음)"
     warning_lines = []
     if rotated_text_warning:
         warning_lines.append("  - ⚠ 회전된 텍스트가 있습니다. 자동 탐지가 놓쳤을 수 있으니 육안으로 재확인하세요.")

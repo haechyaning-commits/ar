@@ -32,11 +32,12 @@ LOG_FILE_NAME = "audit_log.csv"
 # audit_log.LOG_FIELDS 순서와 다르게, 이력 화면에서 사람이 보기 좋은 순서로 재배치
 COLUMNS = [
     "timestamp", "processor", "original_filename", "output_filename",
-    "masked_counts", "review_seconds", "rotated_text_warning", "hidden_content_warning",
+    "masked_counts", "detection_source", "review_seconds", "rotated_text_warning",
+    "hidden_content_warning",
 ]
 COLUMN_LABELS = [
     "처리일시", "처리자", "원본 파일명", "결과물 파일명",
-    "마스킹 건수", "검토 소요(초)", "회전텍스트 경고", "숨김콘텐츠 경고",
+    "마스킹 건수", "탐지 출처(자동/수동)", "검토 소요(초)", "회전텍스트 경고", "숨김콘텐츠 경고",
 ]
 
 

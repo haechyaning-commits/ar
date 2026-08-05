@@ -455,6 +455,9 @@ class MaskResult:
     leftover: list[str] = field(default_factory=list)
     rotated_text_warning: bool = False
     hidden_content_warning: bool = False
+    # 유형별 탐지 출처 세부 내역: {"이름": {"자동": 1, "수동": 1}, ...} (6.7 신규)
+    # 어떤 문서유형에서 자동탐지가 유독 많이 놓치는지 파악할 근거 데이터가 됨
+    source_breakdown: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 def mask_pdf(input_path: str, findings: list[Finding], output_path: str) -> MaskResult:
@@ -505,8 +508,11 @@ def mask_pdf(input_path: str, findings: list[Finding], output_path: str) -> Mask
     os.replace(tmp_path, output_path)
 
     counts: dict[str, int] = {}
+    source_breakdown: dict[str, dict[str, int]] = {}
     for f in findings:
         if f.approved:
             counts[f.type] = counts.get(f.type, 0) + 1
+            by_source = source_breakdown.setdefault(f.type, {})
+            by_source[f.source] = by_source.get(f.source, 0) + 1
 
-    return MaskResult(True, output_path, counts, [], rotated_warning, hidden_warning)
+    return MaskResult(True, output_path, counts, [], rotated_warning, hidden_warning, source_breakdown)

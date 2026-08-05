@@ -137,6 +137,7 @@ def process_atomic(
                 hidden_content_warning=result.hidden_content_warning,
                 processor=processor,
                 review_seconds=review_seconds,
+                source_breakdown=result.source_breakdown,
             )
             write_summary_report(
                 folders.reports,
@@ -149,6 +150,7 @@ def process_atomic(
                 result.masked_counts,
                 rotated_text_warning=result.rotated_text_warning,
                 hidden_content_warning=result.hidden_content_warning,
+                source_breakdown=result.source_breakdown,
             )
         except Exception as exc:
             # 트랜잭션 실패 -> 이미 반영된 부분을 되돌려 원본은 원래 위치로 복구

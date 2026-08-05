@@ -163,9 +163,9 @@ def process_file(input_path: str, workspace_dir: str | None = None,
     if result.hidden_content_warning:
         print("  ⚠ 주석/폼필드/첨부파일 등 숨겨진 콘텐츠가 있습니다. 별도 확인이 필요합니다.")
 
-    # 6.3.2 ②: 처리 이력 조회 UI(설계서 11번, 미구현)가 아직 없으므로, 이 MVP
-    # 범위에서는 처리 성공 직후 물어보는 방식으로 원본-마스킹본 비교를 연결.
-    # _auto_processor_name/_auto_reprocess_confirm과 같은 관례: 헤드리스 테스트가
+    # 6.3.2 ②: 처리 이력 조회 UI(--history, history_view.py)는 별도 진입점이라
+    # 방금 처리한 문서를 바로 비교해보고 싶을 때는 여전히 여기서 한 번 물어보는
+    # 방식을 유지. _auto_processor_name/_auto_reprocess_confirm과 같은 관례: 헤드리스 테스트가
     # _auto_open_comparison을 명시하면 그 값을 그대로 답으로 쓰고, 생략하면(None)
     # 실제 대화형 사용이라고 보고 진짜 QMessageBox로 물어봄.
     if _auto_open_comparison is not None:
